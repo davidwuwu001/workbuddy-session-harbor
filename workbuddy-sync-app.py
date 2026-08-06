@@ -302,13 +302,20 @@ def do_switch(target_uid):
 
 
 def is_workbuddy_running():
+    """进程级检测：pgrep 匹配主二进制（Electron，路径含 WorkBuddy.app/Contents/MacOS）。
+    osascript 的 is running 基于 LaunchServices 注册，退出/被杀后有延迟，不可靠。"""
     import subprocess as sp
     try:
-        r = sp.run(["osascript", "-e", 'application "WorkBuddy" is running'],
-                   capture_output=True, text=True, timeout=10)
-        return "true" in r.stdout.lower()
+        r = sp.run(["pgrep", "-f", "WorkBuddy.app/Contents/MacOS/Electron"],
+                   capture_output=True, timeout=10)
+        return r.returncode == 0
     except Exception:
-        return False
+        try:
+            r = sp.run(["osascript", "-e", 'application "WorkBuddy" is running'],
+                       capture_output=True, text=True, timeout=10)
+            return "true" in r.stdout.lower()
+        except Exception:
+            return False
 
 
 def quit_workbuddy():

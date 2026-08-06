@@ -318,8 +318,21 @@ def is_workbuddy_running():
             return False
 
 
+def kill_all_workbuddy():
+    """杀掉所有 WorkBuddy 进程（主 + helper），循环直到全死。
+    返回 True 表示全死。"""
+    import subprocess as sp
+    for _ in range(10):
+        sp.run(["pkill", "-9", "-f", "WorkBuddy.app"], capture_output=True, timeout=10)
+        time.sleep(1)
+        r = sp.run(["pgrep", "-f", "WorkBuddy.app"], capture_output=True)
+        if r.returncode != 0:
+            return True
+    return False
+
+
 def quit_workbuddy():
-    """退出 WorkBuddy（释放 leveldb 锁）。先优雅 quit，超时则 pkill 主进程。"""
+    """退出 WorkBuddy（释放 leveldb 锁）。先优雅 quit，再循环强杀全部进程。"""
     import subprocess as sp
     try:
         sp.run(["osascript", "-e", 'quit app "WorkBuddy"'], capture_output=True, timeout=10)
@@ -329,17 +342,7 @@ def quit_workbuddy():
         if not is_workbuddy_running():
             return True
         time.sleep(1)
-    # 强杀主进程（服务在沙箱外运行，可直接 pkill）。主二进制名是 Electron，路径含 WorkBuddy.app
-    try:
-        sp.run(["pkill", "-9", "-f", "WorkBuddy.app/Contents/MacOS/Electron"],
-               capture_output=True, timeout=10)
-    except Exception:
-        pass
-    for _ in range(10):
-        if not is_workbuddy_running():
-            return True
-        time.sleep(1)
-    return not is_workbuddy_running()
+    return kill_all_workbuddy()
 
 
 def start_workbuddy():
@@ -358,6 +361,11 @@ def do_switch_full(target_uid):
         return {"ok": False, "error": "无法退出 WorkBuddy，请手动退出后重试"}
     log(f"  [2/4] 写入登录凭据...")
     sw = do_switch(target_uid)
+    if not sw.get("ok"):
+        # 写失败（进程复活抢锁）：重新全杀再试一次
+        log(f"  [2/4] 写入失败({sw.get('error','')})，重新杀进程重试...")
+        kill_all_workbuddy()
+        sw = do_switch(target_uid)
     if not sw.get("ok"):
         start_workbuddy()  # 失败也要恢复 WorkBuddy
         return sw

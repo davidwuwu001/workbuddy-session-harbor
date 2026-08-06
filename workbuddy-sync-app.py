@@ -286,15 +286,18 @@ def do_switch(target_uid):
     if not os.path.exists(script):
         return {"ok": False, "error": f"找不到 {script}"}
     import subprocess
+    import shlex
     payload = json.dumps({"token": acc["access_token"], "refreshToken": acc["refresh_token"]})
     env = os.environ.copy()
     env["NODE_PATH"] = os.path.join(NODE_WORKSPACE, "node_modules")
     try:
+        # 关键：pkill 与 node 写入在同一 shell 命令内连续执行，间隙为零，
+        # 不给 WorkBuddy 自动重启进程抢锁的窗口。
+        cmd = f'pkill -9 -f "WorkBuddy.app"; "{NODE_BIN}" "{script}" "{LEVELDB_PATH}" accountInfo {shlex.quote(payload)}'
         result = subprocess.run(
-            [NODE_BIN, script, LEVELDB_PATH, "accountInfo", payload],
-            capture_output=True, text=True, timeout=15, env=env,
+            cmd, capture_output=True, text=True, timeout=20, env=env, shell=True,
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and "OK:" in result.stdout:
             return {"ok": True, "detail": f"accountInfo 已更新（token {acc['access_token'][:12]}…）"}
         return {"ok": False, "error": (result.stderr or result.stdout)[:300]}
     except Exception as e:
@@ -357,8 +360,7 @@ def start_workbuddy():
 def do_switch_full(target_uid):
     """一体化：退出 WorkBuddy → 写 leveldb 切换登录 → 过户会话 → 启动 WorkBuddy"""
     log(f"  [1/4] 退出 WorkBuddy...")
-    if not quit_workbuddy():
-        return {"ok": False, "error": "无法退出 WorkBuddy，请手动退出后重试"}
+    quit_workbuddy()  # 尽力退出；即使检测失败，下一步原子 kill+写入仍会杀进程并写
     log(f"  [2/4] 写入登录凭据...")
     sw = do_switch(target_uid)
     if not sw.get("ok"):

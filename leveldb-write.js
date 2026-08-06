@@ -13,6 +13,7 @@ if (!dbPath || !key) {
   let db;
   try {
     db = new ClassicLevel(dbPath, { valueEncoding: 'utf8' });
+    await db.open();
     await db.put(key, value || '');
     console.log('OK: ' + key + ' written (' + (value || '').length + ' chars)');
     await db.close();

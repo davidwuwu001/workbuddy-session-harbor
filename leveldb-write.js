@@ -1,7 +1,7 @@
 // leveldb-write.js — 写入 Local Storage leveldb 的指定 key
 // 用法: node leveldb-write.js <dbPath> <key> <value>
 // 依赖: classic-level (NODE_PATH 指向 workspace/node_modules)
-const { Level } = require('classic-level');
+const { ClassicLevel } = require('classic-level');
 
 const [,, dbPath, key, value] = process.argv;
 if (!dbPath || !key) {

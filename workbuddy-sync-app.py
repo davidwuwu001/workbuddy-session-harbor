@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-WorkBuddy 会话同步器（过户模式）- 独立带界面应用
+WorkBuddy Session Harbor（WorkBuddy 会话港）- 独立带界面应用
 
 用法:
   python3 workbuddy-sync-app.py            # 启动并自动打开浏览器
   python3 workbuddy-sync-app.py --port 8000 # 指定端口
+  python3 workbuddy-sync-app.py --no-browser # 仅启动服务（桌面壳使用）
 
 工作流:
   1. 用 cockpit 切换到目标账号
   2. 打开本应用，点"一键同步"
   3. 所有会话过户到当前登录账号，重启 WorkBuddy 即可看到全部
 
-零依赖，仅 Python 标准库。
+账号库读取使用本机已安装的 cryptography。
 """
 
+import base64
+import glob
+import hashlib
 import http.server
 import json
 import os
@@ -23,55 +27,123 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 DB_PATH = os.path.expanduser("~/.workbuddy/workbuddy.db")
 SESSIONS_JSON = os.path.expanduser("~/.workbuddy/app/sessions.json")
 SETTINGS_JSON = os.path.expanduser("~/.workbuddy/settings.json")
 DEFAULT_PORT = 7531
+STARTED_AT = time.time()
 EXPORT_GLOB = os.path.expanduser("~/Downloads/workbuddy_accounts_*.json")
-LEVELDB_PATH = os.path.expanduser("~/.workbuddy/app/session/Local Storage/leveldb")
-NODE_BIN = "/Users/Zhuanz/.workbuddy/binaries/node/versions/22.22.2/bin/node"
-NODE_WORKSPACE = "/Users/Zhuanz/.workbuddy/binaries/node/workspace"
+AUTH_SESSION_PATH = os.path.expanduser(
+    "~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"
+)
+COCKPIT_DIR = os.path.expanduser("~/.antigravity_cockpit")
+COCKPIT_ACCOUNTS_DIR = os.path.join(COCKPIT_DIR, "workbuddy_accounts")
+COCKPIT_KEY_PATH = os.path.join(COCKPIT_DIR, "secure-account-storage.key")
+COCKPIT_INDEX_PATH = os.path.join(COCKPIT_DIR, "workbuddy_accounts.json")
+WORKBUDDY_API = "https://www.codebuddy.cn"
+PENDING_AUTH = {}
 
 
 def find_accounts_export():
     """找最新的账号导出文件（~/Downloads/workbuddy_accounts_*.json）"""
-    import glob
     files = sorted(glob.glob(EXPORT_GLOB), key=os.path.getmtime, reverse=True)
     return files[0] if files else None
 
 
-def parse_quota(acc):
-    """从 usage_raw 解析积分：基础体验包(CapacityType=4) + 活动赠送包(其他聚合)"""
-    base = {"used": 0, "total": 0, "unit": "credits"}
-    gift = {"used": 0, "total": 0, "unit": "credits"}
-    cycle_end = ""
+def cockpit_cipher():
+    """读取 Cockpit 自己的本地密钥；缺失时不创建、不降级为明文。"""
     try:
-        accts = acc["usage_raw"]["data"]["Response"]["Data"]["Accounts"]
-        for c in accts:
-            used = c.get("CapacityUsed", 0)
-            size = c.get("CapacitySize", 0)
-            unit = c.get("CapacityUnit", "credits")
-            if c.get("CapacityType") == 4:
-                base["used"] += used
-                base["total"] += size
-                base["unit"] = unit
-            else:
-                gift["used"] += used
-                gift["total"] += size
-                gift["unit"] = unit
-            ce = c.get("CycleEndTime", "")
-            if ce and ce > cycle_end:
-                cycle_end = ce
-    except Exception:
-        pass
-    return base, gift, cycle_end[:10]
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        key = base64.b64decode(open(COCKPIT_KEY_PATH).read().strip())
+        if len(key) != 32:
+            raise ValueError("密钥长度无效")
+        return AESGCM(key)
+    except Exception as e:
+        raise RuntimeError(f"无法读取 Cockpit 账号库：{e}")
+
+
+def read_cockpit_accounts():
+    cipher = cockpit_cipher()
+    result = {}
+    for path in glob.glob(os.path.join(COCKPIT_ACCOUNTS_DIR, "workbuddy_*.json")):
+        try:
+            envelope = json.load(open(path))
+            raw = cipher.decrypt(
+                base64.b64decode(envelope["nonce"]),
+                base64.b64decode(envelope["ciphertext"]),
+                None,
+            )
+            account = json.loads(raw)
+            uid = account.get("uid")
+            if uid:
+                result[uid] = account
+        except Exception:
+            continue
+    return result
+
+
+def write_cockpit_account(account):
+    """以 Cockpit 的 AES-256-GCM 信封格式原子保存账号。"""
+    cipher = cockpit_cipher()
+    uid = account.get("uid")
+    if not uid:
+        raise RuntimeError("授权账号缺少 UID")
+    now = int(time.time())
+    account.setdefault("created_at", now)
+    account.setdefault("last_used", now)
+    account_id = f"workbuddy_{hashlib.md5(uid.lower().encode()).hexdigest()}"
+    account["id"] = account_id
+    nonce = os.urandom(12)
+    encrypted = cipher.encrypt(nonce, json.dumps(account, ensure_ascii=False).encode(), None)
+    envelope = {
+        "version": 1,
+        "kind": "workbuddy",
+        "algorithm": "AES-256-GCM",
+        "key_id": "local-secure-account-storage-v1",
+        "nonce": base64.b64encode(nonce).decode(),
+        "ciphertext": base64.b64encode(encrypted).decode(),
+        "encrypted_at": int(time.time()),
+    }
+    os.makedirs(COCKPIT_ACCOUNTS_DIR, exist_ok=True)
+    target = os.path.join(COCKPIT_ACCOUNTS_DIR, f"{account_id}.json")
+    temporary = f"{target}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump(envelope, f, ensure_ascii=False, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, target)
+
+    index = json.load(open(COCKPIT_INDEX_PATH)) if os.path.exists(COCKPIT_INDEX_PATH) else {"version": "1.0", "accounts": []}
+    summary = {"id": account_id, "email": account.get("email", account.get("nickname", uid)), "created_at": account["created_at"], "last_used": account["last_used"]}
+    index["accounts"] = [item for item in index.get("accounts", []) if item.get("id") != account_id] + [summary]
+    temp_index = f"{COCKPIT_INDEX_PATH}.{os.getpid()}.tmp"
+    with open(temp_index, "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_index, COCKPIT_INDEX_PATH)
+
+
+def api_request(path, method="GET", payload=None, headers=None, allow_pending=False):
+    body = json.dumps(payload).encode() if payload is not None else None
+    request = Request(f"{WORKBUDDY_API}{path}", data=body, method=method, headers=headers or {})
+    with urlopen(request, timeout=15) as response:
+        data = json.loads(response.read().decode())
+    code = data.get("code", 0)
+    if code not in (0, 200):
+        if allow_pending:
+            return {}
+        raise RuntimeError(data.get("message") or data.get("msg") or f"请求失败 ({code})")
+    return data.get("data", {})
 
 
 def load_accounts_export():
-    """读导出文件，返回 {uid: {nickname, access_token, refresh_token, ...积分}}"""
+    """读导出文件，返回切换登录所需的完整账号会话。"""
     path = find_accounts_export()
     if not path:
         return {}
@@ -84,7 +156,6 @@ def load_accounts_export():
         uid = acc.get("uid", "")
         if not uid:
             continue
-        base, gift, cycle_end = parse_quota(acc)
         result[uid] = {
             "nickname": acc.get("nickname", uid[:8]),
             "access_token": acc.get("access_token", ""),
@@ -92,23 +163,293 @@ def load_accounts_export():
             "token_type": acc.get("token_type", "Bearer"),
             "expires_at": acc.get("expires_at"),
             "domain": acc.get("domain", "www.codebuddy.cn"),
+            "auth_raw": acc.get("auth_raw"),
             "payment_type": acc.get("payment_type", "free"),
-            "base": base,
-            "gift": gift,
-            "cycle_end": cycle_end,
             "export_file": os.path.basename(path),
         }
     return result
+
+
+def prepare_import_accounts(value):
+    """兼容 Cockpit 的对象、数组、accounts/items 包装 JSON。"""
+    if isinstance(value, dict):
+        values = value.get("accounts", value.get("items", [value]))
+    else:
+        values = value
+    if not isinstance(values, list) or not values:
+        raise RuntimeError("导入 JSON 必须是账号对象、账号数组或 accounts/items 包装对象")
+    accounts = []
+    for index, raw in enumerate(values, 1):
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"第 {index} 条账号不是对象")
+        access_token = raw.get("access_token") or raw.get("accessToken") or raw.get("token")
+        uid = raw.get("uid")
+        if not access_token or not uid:
+            raise RuntimeError(f"第 {index} 条账号缺少 uid 或 access_token")
+        account = {
+            "uid": uid,
+            "nickname": raw.get("nickname") or uid[:8],
+            "email": raw.get("email") or raw.get("nickname") or uid,
+            "access_token": access_token,
+            "refresh_token": raw.get("refresh_token") or raw.get("refreshToken"),
+            "enterprise_id": raw.get("enterprise_id") or raw.get("enterpriseId"),
+        }
+        optional = {
+            "enterprise_name": raw.get("enterprise_name") or raw.get("enterpriseName"),
+            "token_type": raw.get("token_type") or raw.get("tokenType"),
+            "expires_at": raw.get("expires_at") or raw.get("expiresAt"),
+            "domain": raw.get("domain"),
+            "auth_raw": raw.get("auth_raw"),
+            "profile_raw": raw.get("profile_raw"),
+            "quota_raw": raw.get("quota_raw"),
+            "usage_raw": raw.get("usage_raw"),
+            "payment_type": raw.get("payment_type"),
+            "status": raw.get("status"),
+        }
+        account.update({key: item for key, item in optional.items() if item is not None})
+        accounts.append(account)
+    return accounts
+
+
+def import_accounts_from_json(content):
+    try:
+        accounts = prepare_import_accounts(json.loads(content))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"JSON 格式错误：{error.msg}")
+    for account in accounts:
+        write_cockpit_account(account)
+    return [{"uid": account["uid"], "nickname": account["nickname"]} for account in accounts]
+
+
+def serialize_accounts_for_export(uids, accounts):
+    if not isinstance(uids, list) or not uids:
+        raise RuntimeError("请至少选择一个账号")
+    payload = []
+    for uid in dict.fromkeys(uids):
+        account = accounts.get(uid)
+        if not account or not account.get("access_token"):
+            raise RuntimeError(f"账号 {uid[:8]} 没有可导出的授权信息")
+        item = json.loads(json.dumps(account))
+        item["uid"] = uid
+        payload.append(item)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def export_current_account_json():
+    current = get_current_account()
+    return serialize_accounts_for_export([current] if current else [], load_accounts())
+
+
+def quota_groups(account):
+    """按 Cockpit 的官方资源分组显示配额。"""
+    groups = {name: {"used": 0.0, "total": 0.0} for name in ("base", "activity", "extra", "other")}
+    codes = {
+        "base": {"TCACA_code_001_PqouKr6QWV", "TCACA_code_002_AkiJS3ZHF5", "TCACA_code_003_FAnt7lcmRT", "TCACA_code_006_DbXS0lrypC", "TCACA_code_008_cfWoLwvjU4"},
+        "activity": {"TCACA_code_007_nzdH5h4Nl0"},
+    }
+    quota = account.get("quota_raw", {})
+    source = quota.get("userResource") if isinstance(quota, dict) else None
+    source = source if isinstance(source, dict) else account.get("usage_raw", {})
+    resources = source.get("data", {}).get("Response", {}).get("Data", {}).get("Accounts", []) if isinstance(source, dict) else []
+    for resource in resources:
+        if resource.get("Status") not in (0, 3):
+            continue
+        code = resource.get("PackageCode")
+        group = "base" if code in codes["base"] else "activity" if code in codes["activity"] else "extra" if code == "TCACA_code_009_0XmEQc2xOf" else "other"
+        total = resource.get("CycleCapacitySizePrecise", resource.get("CycleCapacitySize", resource.get("CapacitySizePrecise", resource.get("CapacitySize", 0))))
+        remain = resource.get("CycleCapacityRemainPrecise", resource.get("CycleCapacityRemain", resource.get("CapacityRemainPrecise", resource.get("CapacityRemain"))))
+        used = float(total or 0) - float(remain) if remain is not None else float(resource.get("CapacityUsedPrecise", resource.get("CapacityUsed", 0)) or 0)
+        groups[group]["used"] += max(0, used)
+        groups[group]["total"] += float(total or 0)
+    return groups
+
+
+def refresh_cockpit_account(uid):
+    accounts = read_cockpit_accounts()
+    account = accounts.get(uid)
+    if not account:
+        raise RuntimeError("Cockpit 账号库中找不到该账号")
+    access_token = account.get("access_token", "")
+    refresh_token = account.get("refresh_token")
+    headers = {"Accept": "application/json, text/plain, */*", "Accept-Language": "zh-CN,zh;q=0.9"}
+    if refresh_token:
+        try:
+            token_headers = {**headers, "Authorization": f"Bearer {access_token}", "X-Refresh-Token": refresh_token}
+            if account.get("domain"):
+                token_headers["X-Domain"] = account["domain"]
+            token_data = api_request(
+                "/v2/plugin/auth/token/refresh",
+                "POST",
+                {},
+                token_headers,
+            )
+            access_token = token_data.get("accessToken", token_data.get("access_token", access_token))
+            refresh_token = token_data.get("refreshToken", token_data.get("refresh_token", refresh_token))
+            account["access_token"] = access_token
+            account["refresh_token"] = refresh_token
+            account["expires_at"] = token_data.get("expiresAt", token_data.get("expires_at", account.get("expires_at")))
+            account["domain"] = token_data.get("domain", account.get("domain"))
+        except Exception as error:
+            log(f"Cockpit token 刷新失败，继续使用已有 token 查询配额：{error}")
+
+    resource_headers = {**headers, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "X-User-Id": uid}
+    enterprise_id = account.get("enterprise_id")
+    if enterprise_id:
+        resource_headers["X-Enterprise-Id"] = enterprise_id
+        resource_headers["X-Tenant-Id"] = enterprise_id
+    if account.get("domain"):
+        resource_headers["X-Domain"] = account["domain"]
+    now = datetime.now()
+    dosage = api_request("/v2/billing/meter/get-dosage-notify", "POST", None, resource_headers)
+    payment = api_request("/v2/billing/meter/get-payment-type", "POST", None, resource_headers)
+    user_resource = {"data": api_request(
+        "/v2/billing/meter/get-user-resource",
+        "POST",
+        {"PageNumber": 1, "PageSize": 100, "ProductCode": "p_tcaca", "Status": [0, 3],
+         "PackageEndTimeRangeBegin": now.strftime("%Y-%m-%d %H:%M:%S"),
+         "PackageEndTimeRangeEnd": (now + timedelta(days=365 * 101)).strftime("%Y-%m-%d %H:%M:%S")},
+        resource_headers,
+    )}
+    account["usage_raw"] = user_resource
+    account["quota_raw"] = {"dosage": {"data": dosage}, "payment": {"data": payment}, "userResource": user_resource}
+    if isinstance(dosage, dict) and dosage.get("dosageNotifyCode") is not None:
+        account["dosage_notify_code"] = str(dosage["dosageNotifyCode"])
+    payment_type = payment.get("paymentType") if isinstance(payment, dict) else payment
+    if isinstance(payment_type, str) and payment_type:
+        account["payment_type"] = payment_type
+    auth_raw = account.get("auth_raw")
+    if isinstance(auth_raw, dict):
+        auth = auth_raw.get("auth") if isinstance(auth_raw.get("auth"), dict) else auth_raw
+        auth["accessToken"] = access_token
+        auth["refreshToken"] = refresh_token
+        if account.get("expires_at") is not None:
+            auth["expiresAt"] = account["expires_at"]
+    account["last_used"] = int(time.time())
+    write_cockpit_account(account)
+    return account
+
+
+def load_accounts():
+    """Cockpit 账号库为主源；旧导出只作为迁移失败时的切换回退。"""
+    try:
+        accounts = read_cockpit_accounts()
+        if accounts:
+            return accounts
+    except RuntimeError as error:
+        log(str(error))
+    return load_accounts_export()
+
+
+def refresh_quota(target_uid):
+    account = refresh_cockpit_account(target_uid)
+    groups = quota_groups(account)
+    used = sum(group["used"] for group in groups.values())
+    total = sum(group["total"] for group in groups.values())
+    return {"ok": True, "used": used, "total": total, "groups": groups, "unit": "credits"}
+
+
+def start_cockpit_authorization():
+    data = api_request("/v2/plugin/auth/state?platform=workbuddy", "POST", {}, {"Content-Type": "application/json"})
+    state = data.get("state")
+    if not state:
+        raise RuntimeError("授权响应缺少 state")
+    login_id = hashlib.md5(f"{state}:{time.time()}".encode()).hexdigest()
+    PENDING_AUTH[login_id] = {"state": state, "expires_at": time.time() + 600}
+    return {"login_id": login_id, "url": data.get("authUrl") or f"{WORKBUDDY_API}/login?state={state}"}
+
+
+def poll_cockpit_authorization(login_id):
+    pending = PENDING_AUTH.get(login_id)
+    if not pending or time.time() > pending["expires_at"]:
+        PENDING_AUTH.pop(login_id, None)
+        return {"ok": False, "pending": False, "error": "授权已过期"}
+    data = api_request(f"/v2/plugin/auth/token?state={pending['state']}", allow_pending=True)
+    access_token = data.get("accessToken", data.get("access_token", ""))
+    if not access_token:
+        return {"ok": True, "pending": True}
+    profile_headers = {"Authorization": f"Bearer {access_token}"}
+    if data.get("domain"):
+        profile_headers["X-Domain"] = data["domain"]
+    profile = api_request(f"/v2/plugin/login/account?state={pending['state']}", headers=profile_headers)
+    uid = profile.get("uid")
+    if not uid:
+        raise RuntimeError("授权响应缺少 UID")
+    account = {
+        "uid": uid, "nickname": profile.get("nickname") or uid[:8], "email": profile.get("email") or profile.get("nickname") or uid,
+        "enterprise_id": profile.get("enterpriseId"), "enterprise_name": profile.get("enterpriseName"),
+        "access_token": access_token, "refresh_token": data.get("refreshToken", data.get("refresh_token")),
+        "token_type": data.get("tokenType", data.get("token_type", "Bearer")), "expires_at": data.get("expiresAt", data.get("expires_at")),
+        "domain": data.get("domain", "www.codebuddy.cn"), "auth_raw": data, "profile_raw": profile,
+        "created_at": int(time.time()), "last_used": int(time.time()),
+    }
+    write_cockpit_account(account)
+    try:
+        refresh_cockpit_account(uid)
+    except Exception as error:
+        log(f"新账号已授权，但首次额度刷新失败：{error}")
+    PENDING_AUTH.pop(login_id, None)
+    return {"ok": True, "pending": False, "uid": uid, "nickname": account["nickname"]}
 
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def get_running_account():
+    """从 WorkBuddy 当前运行进程的诊断参数读取已认证账号。"""
+    import re
+    import subprocess as sp
+    try:
+        result = sp.run(["ps", "ax", "-o", "command="], capture_output=True, text=True, timeout=10)
+        accounts = [
+            match.group(1)
+            for line in result.stdout.splitlines()
+            if "WorkBuddy.app" in line and "chrome_crashpad_handler" in line
+            for match in [re.search(r'"uid":"([0-9a-f-]{36})"', line)]
+            if match
+        ]
+        return accounts[-1] if accounts else None
+    except Exception:
+        return None
+
+
+def get_service_status():
+    """返回当前本地服务进程的 RSS 内存；ps 的 rss 单位为 KiB。"""
+    import subprocess as sp
+    rss_kb = 0
+    try:
+        result = sp.run(["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True, timeout=5)
+        rss_kb = int(result.stdout.strip() or 0)
+    except Exception:
+        pass
+    return {"pid": os.getpid(), "rss_mb": round(rss_kb / 1024, 1), "uptime_seconds": int(time.time() - STARTED_AT)}
+
+
+def script_restart_argv():
+    return [sys.executable, *sys.argv]
+
+
+def restart_script():
+    """用相同解释器替换当前服务进程，桌面壳无需额外守护进程。"""
+    log("重启后台脚本...")
+    os.execv(sys.executable, script_restart_argv())
+
+
+def wait_for_running_account(timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        account = get_running_account()
+        if account:
+            return account
+        time.sleep(0.25)
+    return None
+
+
 def get_current_account():
-    """当前 cockpit 登录账号 = DB 里正在运行的对话(status=working, 最新updated)的 user_id
-    原理：会话 user_id 在创建时锁定为当时登录账号，当前 working 会话即当前登录账号。
-    回退：最新创建的会话 user_id。"""
+    """优先返回 WorkBuddy 实际运行中的认证账号；关闭时才回退到最近会话。"""
+    running = get_running_account()
+    if running:
+        return running
     if not os.path.exists(DB_PATH):
         return None
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -144,9 +485,9 @@ def get_distribution():
 
 
 def get_all_accounts():
-    """聚合账号：优先用导出文件（含昵称+积分+token），合并 DB 会话数 + is_current"""
+    """聚合 Cockpit 授权账号与本地会话数。"""
     current = get_current_account()
-    export = load_accounts_export()
+    export = load_accounts()
     accs = {}  # uid -> info dict
 
     # 先用导出文件初始化（有昵称+积分+token）
@@ -189,20 +530,33 @@ def get_all_accounts():
     # 组装 + 排序（当前账号优先，然后会话数降序）
     items = []
     for uid, info in accs.items():
+        quota = quota_groups(info)
+        base = quota["base"]
+        activity = quota["activity"]
+        categories = [
+            {"key": key, "label": label, **group}
+            for key, label, group in (
+                ("base", "基础体验包", base),
+                ("activity", "活动赠送包", activity),
+                ("extra", "加量包", quota["extra"]),
+                ("other", "其他", quota["other"]),
+            )
+            if group["total"] > 0 or group["used"] > 0
+        ]
         items.append({
             "user_id": uid,
             "nickname": info.get("nickname", uid[:8]),
             "sessions": info.get("sessions", 0),
             "is_current": uid == current,
             "payment_type": info.get("payment_type", "unknown"),
-            "base": info.get("base", {"used": 0, "total": 0, "unit": ""}),
-            "gift": info.get("gift", {"used": 0, "total": 0, "unit": ""}),
+            "base": base,
+            "gift": activity,
+            "categories": categories,
             "total": {
-                "used": info.get("base", {}).get("used", 0) + info.get("gift", {}).get("used", 0),
-                "total": info.get("base", {}).get("total", 0) + info.get("gift", {}).get("total", 0),
-                "unit": info.get("base", {}).get("unit", "") or "credits",
+                "used": sum(group["used"] for group in quota.values()),
+                "total": sum(group["total"] for group in quota.values()),
+                "unit": "credits",
             },
-            "cycle_end": info.get("cycle_end", ""),
             "has_token": bool(info.get("access_token")),
         })
     items.sort(key=lambda x: (not x["is_current"], -x["sessions"]))
@@ -272,35 +626,74 @@ def do_sync(target_uid):
     }
 
 
+def build_auth_session(account):
+    """按 Cockpit 的默认客户端格式，从授权账号生成完整 WorkBuddy 会话。"""
+    uid = account.get("uid")
+    access_token = account.get("access_token")
+    if not uid or not access_token:
+        return None
+    raw = account.get("auth_raw") if isinstance(account.get("auth_raw"), dict) else {}
+    profile = account.get("profile_raw") if isinstance(account.get("profile_raw"), dict) else raw.get("account", {})
+    account_value = json.loads(json.dumps(profile)) if isinstance(profile, dict) else {}
+    account_value.update({"uid": uid, "nickname": account.get("nickname") or uid[:8], "lastLogin": True, "pluginEnabled": True})
+    account_value.setdefault("type", "personal")
+    account_value.setdefault("accountType", "")
+    account_value.setdefault("idp", "")
+    account_value.setdefault("oneidAccountId", "")
+    account_value.setdefault("areaInfoComplete", False)
+    account_value.setdefault("isCurrentOneIdEnterprise", False)
+    account_value.setdefault("isFirstLogin", False)
+    account_value.setdefault("deployStatus", {"statusCode": 0, "statusMsg": "", "detailMsg": ""})
+    account_value.setdefault("sso", {"domain": "", "domainModifiedTimes": 0})
+
+    raw_auth = raw.get("auth") if isinstance(raw.get("auth"), dict) else raw
+    auth = json.loads(json.dumps(raw_auth)) if isinstance(raw_auth, dict) else {}
+    auth.update({
+        "accessToken": access_token,
+        "refreshToken": account.get("refresh_token") or "",
+        "tokenType": account.get("token_type") or "Bearer",
+        "domain": account.get("domain") or "",
+        "lastRefreshTime": int(time.time() * 1000),
+    })
+    expires_at = account.get("expires_at")
+    if expires_at is not None:
+        auth["expiresAt"] = expires_at
+        auth["expiresIn"] = max(0, (int(expires_at) - int(time.time() * 1000)) // 1000)
+        refresh_expires_at = auth.get("refreshExpiresAt", expires_at)
+        auth["refreshExpiresAt"] = refresh_expires_at
+        auth["refreshExpiresIn"] = max(0, (int(refresh_expires_at) - int(time.time() * 1000)) // 1000)
+    else:
+        auth.setdefault("expiresIn", 0)
+        auth.setdefault("refreshExpiresIn", 0)
+    auth.setdefault("scope", "openid profile offline_access email")
+    return {"account": account_value, "auth": auth, "accounts": [account_value]}
+
+
 def do_switch(target_uid):
-    """切换登录账号：写 Local Storage leveldb 的 accountInfo（token+refreshToken）
-    用 node + classic-level 模块写 leveldb（Python 无标准库）。
-    前提：WorkBuddy 未运行（否则 leveldb 被锁）。"""
-    export = load_accounts_export()
-    acc = export.get(target_uid)
-    if not acc:
-        return {"ok": False, "error": "导出文件中找不到该账号"}
-    if not acc.get("access_token"):
-        return {"ok": False, "error": "该账号没有 access_token"}
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leveldb-write.js")
-    if not os.path.exists(script):
-        return {"ok": False, "error": f"找不到 {script}"}
-    import subprocess
-    import shlex
-    payload = json.dumps({"token": acc["access_token"], "refreshToken": acc["refresh_token"]})
-    env = os.environ.copy()
-    env["NODE_PATH"] = os.path.join(NODE_WORKSPACE, "node_modules")
+    """原子替换 WorkBuddy 主进程读取的完整认证会话。"""
+    account = load_accounts().get(target_uid)
+    session = build_auth_session(account or {})
+    if not session or session["account"].get("uid") != target_uid:
+        return {"ok": False, "error": "该账号缺少可用的完整认证会话，请重新导出账号后再试"}
+    if not os.path.exists(AUTH_SESSION_PATH):
+        return {"ok": False, "error": f"找不到 WorkBuddy 认证文件：{AUTH_SESSION_PATH}"}
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup = f"{AUTH_SESSION_PATH}.bak.{ts}"
+    temporary = f"{AUTH_SESSION_PATH}.{os.getpid()}.tmp"
     try:
-        # 关键：pkill 与 node 写入在同一 shell 命令内连续执行，间隙为零，
-        # 不给 WorkBuddy 自动重启进程抢锁的窗口。
-        cmd = f'pkill -9 -f "WorkBuddy.app"; "{NODE_BIN}" "{script}" "{LEVELDB_PATH}" accountInfo {shlex.quote(payload)}'
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=20, env=env, shell=True,
-        )
-        if result.returncode == 0 and "OK:" in result.stdout:
-            return {"ok": True, "detail": f"accountInfo 已更新（token {acc['access_token'][:12]}…）"}
-        return {"ok": False, "error": (result.stderr or result.stdout)[:300]}
+        shutil.copy2(AUTH_SESSION_PATH, backup)
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(session, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, AUTH_SESSION_PATH)
+        return {"ok": True, "backup": os.path.basename(backup)}
     except Exception as e:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
         return {"ok": False, "error": str(e)}
 
 
@@ -358,22 +751,35 @@ def start_workbuddy():
 
 
 def do_switch_full(target_uid):
-    """一体化：退出 WorkBuddy → 写 leveldb 切换登录 → 过户会话 → 启动 WorkBuddy"""
-    log(f"  [1/4] 退出 WorkBuddy...")
-    quit_workbuddy()  # 尽力退出；即使检测失败，下一步原子 kill+写入仍会杀进程并写
-    log(f"  [2/4] 写入登录凭据...")
+    """切换真实登录身份，确认成功后才把会话过户到同一账号。"""
+    log(f"  [0/6] 按 Cockpit 规则刷新目标账号 token...")
+    try:
+        refresh_cockpit_account(target_uid)
+    except Exception as error:
+        return {"ok": False, "error": f"目标账号刷新失败：{error}"}
+    log(f"  [1/6] 退出 WorkBuddy...")
+    quit_workbuddy()
+    log(f"  [2/6] 写入完整认证会话...")
     sw = do_switch(target_uid)
-    if not sw.get("ok"):
-        # 写失败（进程复活抢锁）：重新全杀再试一次
-        log(f"  [2/4] 写入失败({sw.get('error','')})，重新杀进程重试...")
-        kill_all_workbuddy()
-        sw = do_switch(target_uid)
     if not sw.get("ok"):
         start_workbuddy()  # 失败也要恢复 WorkBuddy
         return sw
-    log(f"  [3/4] 过户会话...")
+    log(f"  [3/6] 启动 WorkBuddy 并校验登录账号...")
+    if not start_workbuddy():
+        return {"ok": False, "error": "无法启动 WorkBuddy，未执行会话同步"}
+    actual_uid = wait_for_running_account()
+    if actual_uid != target_uid:
+        return {
+            "ok": False,
+            "error": f"登录校验失败：实际账号为 {actual_uid or '未检测到'}，未执行会话同步",
+            "auth_backup": sw.get("backup", ""),
+        }
+
+    log(f"  [4/6] 已确认登录账号，退出 WorkBuddy 以同步会话...")
+    quit_workbuddy()
+    log(f"  [5/6] 过户会话...")
     sy = do_sync(target_uid)
-    log(f"  [4/4] 启动 WorkBuddy...")
+    log(f"  [6/6] 启动 WorkBuddy...")
     started = start_workbuddy()
     return {
         "ok": True,
@@ -381,45 +787,9 @@ def do_switch_full(target_uid):
         "moved_sessions": sy.get("moved_sessions", 0),
         "total_now": sy.get("total_now", 0),
         "backup": sy.get("backup", ""),
+        "auth_backup": sw.get("backup", ""),
         "restarted": started,
     }
-
-
-def refresh_quota(target_uid):
-    """调 codebuddy.cn API 实时查询账号积分（/v2/billing/meter/get-user-resource）"""
-    import urllib.request, ssl
-    from datetime import datetime, timedelta
-    export = load_accounts_export()
-    acc = export.get(target_uid)
-    if not acc or not acc.get("access_token"):
-        return {"ok": False, "error": "无 access_token"}
-    now = datetime.now()
-    body = json.dumps({
-        "PageNumber": 1, "PageSize": 100,
-        "ProductCode": "p_tcaca", "Status": [0, 3],
-        "PackageEndTimeRangeBegin": now.strftime('%Y-%m-%d 00:00:00'),
-        "PackageEndTimeRangeEnd": (now + timedelta(days=365*101)).strftime('%Y-%m-%d 23:59:59'),
-    }).encode('utf-8')
-    req = urllib.request.Request(
-        'https://www.codebuddy.cn/v2/billing/meter/get-user-resource',
-        data=body, method='POST',
-        headers={
-            'Authorization': f'Bearer {acc["access_token"]}',
-            'Content-Type': 'application/json',
-            'X-User-Id': target_uid,
-            'X-Domain': acc.get('domain', 'www.codebuddy.cn'),
-            'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0',
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=12, context=ssl.create_default_context()) as r:
-            resp = json.loads(r.read().decode('utf-8'))
-            accts = resp.get('data', {}).get('Response', {}).get('Data', {}).get('Accounts', [])
-            used = sum(c.get('CapacityUsed', 0) for c in accts)
-            total = sum(c.get('CapacitySize', 0) for c in accts)
-            return {"ok": True, "used": used, "total": total, "unit": "credits", "packages": len(accts)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -427,7 +797,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WorkBuddy 会话同步器</title>
+<title>WorkBuddy 会话港</title>
 <style>
   :root {
     --bg: #1a1a1a; --surface: #242424; --surface2: #2e2e2e;
@@ -436,8 +806,14 @@ HTML_PAGE = """<!DOCTYPE html>
     --radius: 10px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.6; padding: 24px; max-width: 720px; margin: 0 auto; }
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.6; padding: clamp(12px, 3vw, 24px); max-width: 960px; margin: 0 auto; min-width: 0; }
+  .title-row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 4px; }
+  h1 { font-size: 20px; font-weight: 600; }
+  .service-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  .service-status { color: var(--green); font-size: 11px; white-space: nowrap; }
+  .service-btn { background: transparent; border: 1px solid var(--border); color: var(--text2); padding: 3px 7px; border-radius: 5px; font-size: 11px; cursor: pointer; }
+  .service-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .service-btn.restart:hover { border-color: var(--warn); color: var(--warn); }
   .sub { color: var(--text2); font-size: 13px; margin-bottom: 24px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; }
   .label { color: var(--text3); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
@@ -452,6 +828,13 @@ HTML_PAGE = """<!DOCTYPE html>
   .btn { width: 100%; padding: 16px; background: var(--accent); color: #fff; border: none; border-radius: var(--radius); font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
   .btn:hover { background: var(--accent2); }
   .btn:disabled { background: var(--surface2); color: var(--text3); cursor: not-allowed; }
+  .auth-card { padding: 14px 16px; }
+  .auth-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .auth-action { flex: 1; min-width: 150px; padding: 10px 12px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 7px; font-size: 13px; text-align: center; cursor: pointer; }
+  .auth-action:hover { border-color: var(--accent); color: var(--accent); }
+  .auth-link-box { display: flex; gap: 8px; margin-top: 10px; }
+  .auth-link-box input { min-width: 0; flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text2); border-radius: 6px; padding: 7px 9px; font-size: 12px; }
+  .auth-hint { color: var(--text3); font-size: 11px; margin-top: 6px; }
   .log { background: var(--surface2); border-radius: var(--radius); padding: 14px 16px; margin-top: 16px; font-family: "SF Mono", Consolas, monospace; font-size: 12px; color: var(--text2); white-space: pre-wrap; min-height: 20px; max-height: 240px; overflow-y: auto; }
   .log:empty::before { content: "等待操作..."; color: var(--text3); }
   .ok { color: var(--green); } .err { color: #ff5252; } .warn { color: var(--warn); }
@@ -460,6 +843,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .acc-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 12px; }
   .acc-card.cur { border-color: var(--green); }
   .acc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .export-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .acc-nick { font-size: 16px; font-weight: 600; }
   .badge-free { background: var(--surface2); color: var(--text2); font-size: 10px; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
   .badge-cur { background: var(--green); color: #fff; font-size: 10px; padding: 2px 7px; border-radius: 3px; }
@@ -475,44 +859,65 @@ HTML_PAGE = """<!DOCTYPE html>
   .switch-btn { background: transparent; border: 1px solid var(--accent); color: var(--accent); font-size: 12px; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-weight: 500; }
   .switch-btn:hover { background: var(--accent); color: #fff; }
   .switch-btn:disabled { border-color: var(--text3); color: var(--text3); cursor: not-allowed; }
+  .launch-btn { background: var(--accent); color: #fff; border: 1px solid var(--accent); font-size: 12px; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-weight: 500; }
+  .launch-btn:hover { background: var(--accent2); }
   .refresh-btn { background: transparent; border: 1px solid var(--border); color: var(--text2); font-size: 11px; padding: 2px 10px; border-radius: 5px; cursor: pointer; margin-left: auto; }
   .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
   .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .sync-radio { font-size: 12px; color: var(--text2); cursor: pointer; display: flex; align-items: center; gap: 4px; }
-  .sync-radio input { accent-color: var(--accent); }
   .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--text3); border-top-color: var(--accent); border-radius: 50%; animation: sp 0.7s linear infinite; vertical-align: middle; margin-right: 6px; }
   @keyframes sp { to { transform: rotate(360deg); } }
+  @media (max-width: 520px) {
+    .title-row { align-items: flex-start; flex-direction: column; gap: 4px; }
+    .service-tools { justify-content: flex-start; }
+    .sub { margin-bottom: 14px; }
+    .card, .acc-card { padding: 14px; }
+    .auth-actions { display: grid; grid-template-columns: 1fr; }
+    .auth-action { min-width: 0; width: 100%; }
+    .auth-link-box { flex-wrap: wrap; }
+    .auth-link-box .auth-action { flex: 0 0 auto; width: auto; }
+    .pkg-row { align-items: flex-start; flex-direction: column; gap: 1px; }
+    .acc-head .refresh-btn { margin-left: 0; }
+    .acc-foot { align-items: stretch; flex-direction: column; }
+    .acc-actions, .switch-btn, .launch-btn { width: 100%; }
+  }
 </style>
 </head>
 <body>
-  <h1>WorkBuddy 会话同步器</h1>
-  <p class="sub">过户模式 · 把所有账号的会话归并到当前登录账号</p>
+  <div class="title-row"><h1>WorkBuddy 会话港</h1><div class="service-tools"><span class="service-status" id="serviceStatus">后台脚本检测中…</span><button class="service-btn" id="refreshStatusBtn">刷新状态</button><button class="service-btn restart" id="restartScriptBtn">重启脚本</button></div></div>
+  <p class="sub">Cockpit 授权与额度刷新 · 本工具负责会话同步与切号</p>
+  <div class="card auth-card">
+    <div class="label">账号授权</div>
+    <div class="auth-actions">
+      <button class="auth-action" id="authLinkBtn">生成授权链接</button>
+      <label class="auth-action" for="importFile">导入 JSON 文件</label>
+      <input id="importFile" type="file" accept="application/json,.json" hidden>
+      <button class="auth-action" id="exportBtn" disabled>导出所选账号 JSON</button>
+    </div>
+    <div id="authLinkBox" hidden>
+      <div class="auth-link-box"><input id="authLink" readonly><button class="auth-action" id="copyLinkBtn">复制</button></div>
+      <div class="auth-hint">复制链接后自行在浏览器完成登录；本页会自动识别授权结果。</div>
+    </div>
+  </div>
 
   <div class="card">
-    <div class="label">当前 cockpit 登录账号</div>
+    <div class="label">当前 WorkBuddy 登录账号</div>
     <div class="current-uid" id="current">检测中...</div>
   </div>
 
-  <div class="label" style="margin-bottom:12px">账号列表 · 点"切换登录"换号 · 勾选后点下方按钮同步会话</div>
+  <div class="label" style="margin-bottom:12px">账号列表 · 每张卡一个主操作</div>
   <div id="dist"><span class="spin"></span>加载中</div>
-
-  <button class="btn" id="syncBtn" disabled>同步到选中账号</button>
 
   <div class="log" id="log"></div>
 
   <div class="tip">
-    <b>使用步骤</b><br>
-    1. 在上方选择目标账号（默认当前登录账号）<br>
-    2. 点击按钮，把所有会话过户到该账号<br>
-    3. 去 cockpit 切换到该账号（若尚未切换）<br>
-    4. <b>重启 WorkBuddy</b>，即可看到全部会话<br><br>
-    <b>原理</b>：将所有会话的 user_id 改为选中的目标账号。会话跟随目标账号。<br>
-    <b>切换登录态</b>：cockpit 是 WorkBuddy 内置的账号管理，登录 token 由后端管理，需在 cockpit 内切换。本工具负责会话归属同步。<br>
-    <b>安全</b>：每次同步自动备份 workbuddy.db，可随时回滚。
+    <b>使用方法</b><br>
+    点击目标账号的“切换并同步”：工具会切换登录、确认实际账号、归并会话并重启 WorkBuddy。<br>
+    当前登录账号可点击“启动 WorkBuddy”。每次会话同步自动备份 workbuddy.db。
   </div>
 
 <script>
 const $ = id => document.getElementById(id);
+const selectedForExport = new Set();
 function appendLog(text, cls) {
   const line = document.createElement('div');
   if (cls) line.className = cls;
@@ -525,113 +930,184 @@ async function loadStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
+    $('serviceStatus').textContent = '后台脚本运行中 · ' + d.service.rss_mb + ' MB · PID ' + d.service.pid;
     if (!d.current) {
       $('current').textContent = '未检测到（请先用 cockpit 登录任意账号）';
       $('current').style.color = 'var(--warn)';
       return;
     }
-    $('current').textContent = d.current;
-    $('syncBtn').disabled = false;
-
+    $('current').textContent = d.current + (d.current_verified ? '' : '（WorkBuddy 未运行，数据库推断）');
     let html = '';
     for (const a of d.accounts) {
-      const pct = (q) => q.total > 0 ? Math.min(100, Math.round(q.used/q.total*100)) : 0;
-      const fillCls = (q) => pct(q) >= 80 ? ' warn' : '';
       html += '<div class="acc-card' + (a.is_current ? ' cur' : '') + '">';
-      html += '<div class="acc-head"><span class="acc-nick">' + a.nickname + '</span>';
+      html += '<div class="acc-head"><input class="export-check" type="checkbox" aria-label="选择 ' + a.nickname + ' 导出" data-uid="' + a.user_id + '" ' + (selectedForExport.has(a.user_id) ? 'checked' : '') + '><span class="acc-nick">' + a.nickname + '</span>';
       html += '<span class="badge-free">' + (a.payment_type||'free').toUpperCase() + '</span>';
       if (a.is_current) html += '<span class="badge-cur">当前登录</span>';
-      html += '</div>';
-      html += '<div class="pkg"><div class="pkg-row"><span class="pkg-name">积分</span><span class="pkg-val" id="quota-' + a.user_id + '">' + a.total.used + '/' + a.total.total + ' ' + a.total.unit + '</span><button class="refresh-btn" data-uid="' + a.user_id + '">刷新</button></div>';
-      html += '<div class="quota-bar" id="bar-' + a.user_id + '"><div class="quota-fill' + fillCls(a.total) + '" style="width:' + pct(a.total) + '%"></div></div></div>';
-      html += '<div class="acc-foot"><span>' + a.sessions + ' 会话' + (a.cycle_end ? ' · 周期至 ' + a.cycle_end : '') + '</span>';
+      html += '<button class="refresh-btn" data-uid="' + a.user_id + '">刷新</button></div>';
+      for (const q of a.categories || []) {
+        const pct = q.total > 0 ? Math.min(100, Math.round(q.used / q.total * 100)) : 0;
+        html += '<div class="pkg"><div class="pkg-row"><span class="pkg-name">' + q.label + '</span><span class="pkg-val">' + formatQuota(q.used) + ' / ' + formatQuota(q.total) + ' credits</span></div>';
+        html += '<div class="quota-bar"><div class="quota-fill' + (pct >= 80 ? ' warn' : '') + '" style="width:' + pct + '%"></div></div></div>';
+      }
+      html += '<div class="acc-foot"><span>' + a.sessions + ' 会话</span>';
       html += '<div class="acc-actions">';
-      const swBtn = a.is_current ? '当前账号' : (a.has_token ? '切换并同步' : '无token');
-      html += '<button class="switch-btn" data-uid="' + a.user_id + '" ' + (a.is_current || !a.has_token ? 'disabled' : '') + '>' + swBtn + '</button>';
-      html += '<label class="sync-radio"><input type="radio" name="target" value="' + a.user_id + '"' + (a.is_current ? ' checked' : '') + '>同步到此</label>';
+      if (a.is_current) {
+        html += '<button class="launch-btn" data-uid="' + a.user_id + '">' + (d.workbuddy_running ? '打开 WorkBuddy' : '启动 WorkBuddy') + '</button>';
+      } else {
+        html += '<button class="switch-btn" data-uid="' + a.user_id + '" ' + (!a.has_token ? 'disabled' : '') + '>' + (a.has_token ? '切换并同步' : '无 token') + '</button>';
+      }
       html += '</div></div></div>';
     }
     $('dist').innerHTML = html;
+    updateExportButton();
   } catch (e) {
     $('dist').innerHTML = '<span class="err">加载失败: ' + e.message + '</span>';
   }
 }
 
+function formatQuota(value) {
+  return Number(value || 0).toLocaleString('zh-CN', {maximumFractionDigits: 2});
+}
+
+async function refreshQuota(uid) {
+  const btn = document.querySelector('.refresh-btn[data-uid="'+uid+'"]');
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  appendLog('按 Cockpit 规则刷新额度 ' + uid.slice(0,8) + '…');
+  try {
+    const r = await fetch('/api/refresh', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({uid})});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog('额度已按 Cockpit 资源包刷新', 'ok');
+    loadStatus();
+  } catch (e) { appendLog('额度刷新失败: ' + e.message, 'err'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '刷新'; } }
+}
+
+let authorizationTimer;
+async function authorizeAccount() {
+  const button = document.getElementById('authLinkBtn');
+  button.disabled = true;
+  try {
+    const start = await (await fetch('/api/auth/start', {method:'POST'})).json();
+    if (!start.ok) throw new Error(start.error);
+    $('authLink').value = start.url;
+    $('authLinkBox').hidden = false;
+    appendLog('授权链接已生成，请复制后在浏览器完成登录…');
+    clearInterval(authorizationTimer);
+    authorizationTimer = setInterval(async () => {
+      const result = await (await fetch('/api/auth/poll', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({login_id:start.login_id})})).json();
+      if (result.pending) return;
+      clearInterval(authorizationTimer);
+      if (!result.ok) appendLog('授权失败: ' + result.error, 'err');
+      else { appendLog('授权成功: ' + result.nickname, 'ok'); loadStatus(); }
+      button.disabled = false;
+    }, 2000);
+  } catch (e) { appendLog('授权启动失败: ' + e.message, 'err'); button.disabled = false; }
+}
+
+async function importAccounts(file) {
+  if (!file) return;
+  appendLog('正在导入 Cockpit JSON…');
+  try {
+    const r = await fetch('/api/import', {method:'POST', headers:{'Content-Type':'application/json'}, body:await file.text()});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog('已导入 ' + d.accounts.length + ' 个账号', 'ok');
+    loadStatus();
+  } catch (e) { appendLog('导入失败: ' + e.message, 'err'); }
+  finally { $('importFile').value = ''; }
+}
+
+function updateExportButton() {
+  const button = $('exportBtn');
+  button.disabled = selectedForExport.size === 0;
+  button.textContent = selectedForExport.size ? '导出所选账号 JSON (' + selectedForExport.size + ')' : '导出所选账号 JSON';
+}
+
+async function exportSelectedAccounts() {
+  if (!selectedForExport.size) return;
+  try {
+    const r = await fetch('/api/export', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({uids:[...selectedForExport]})});
+    if (!r.ok) { const d = await r.json(); throw new Error(d.error); }
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(await r.blob());
+    link.download = 'workbuddy_accounts.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    appendLog('已导出 ' + selectedForExport.size + ' 个账号 JSON', 'ok');
+  } catch (e) { appendLog('导出失败: ' + e.message, 'err'); }
+}
+
+async function launchWorkBuddy() {
+  appendLog('正在启动 WorkBuddy…');
+  try {
+    const d = await (await fetch('/api/launch', {method:'POST'})).json();
+    if (!d.ok) throw new Error('无法启动 WorkBuddy');
+    appendLog('已发送启动请求', 'ok');
+    setTimeout(loadStatus, 1000);
+  } catch (e) { appendLog('启动失败: ' + e.message, 'err'); }
+}
+
+async function restartScript() {
+  if (!confirm('确认重启后台脚本？服务会短暂不可用，然后自动恢复。')) return;
+  const button = $('restartScriptBtn');
+  button.disabled = true;
+  try {
+    const d = await (await fetch('/api/restart', {method:'POST'})).json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog('后台脚本正在重启…', 'ok');
+    setTimeout(loadStatus, 1200);
+  } catch (e) { appendLog('重启失败: ' + e.message, 'err'); button.disabled = false; }
+}
+
+let switching = false;
 async function switchAccount(uid) {
-  if (!confirm('确认切换登录到该账号？\\n切换后会写入认证凭据，需重启 WorkBuddy 生效。')) return;
-  appendLog('切换登录到 ' + uid.slice(0,8) + '…');
+  if (switching || !confirm('确认切换并同步到该账号？\\n工具会验证实际登录账号后再迁移会话。')) return;
+  switching = true;
+  document.querySelectorAll('.switch-btn').forEach(btn => btn.disabled = true);
+  $('log').innerHTML = '';
+  appendLog('切换并同步到 ' + uid.slice(0,8) + '…');
   try {
     const r = await fetch('/api/switch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({uid}) });
     const d = await r.json();
     if (d.ok) {
-      appendLog('登录已切换: ' + d.switch_detail, 'ok');
+      appendLog('登录已确认: ' + d.switch_detail, 'ok');
       appendLog('会话已过户: ' + d.moved_sessions + ' 条', 'ok');
       appendLog('该账号现有会话: ' + d.total_now + ' 条', 'ok');
-      appendLog('请重启 WorkBuddy —— 重启后登录+会话全部到位', 'warn');
-    } else {
-      appendLog('失败: ' + d.error, 'err');
-    }
-  } catch (e) {
-    appendLog('错误: ' + e.message, 'err');
-  }
-}
-
-$('syncBtn').onclick = async () => {
-  $('syncBtn').disabled = true;
-  $('log').innerHTML = '';
-  appendLog('开始同步...');
-  try {
-    const target = document.querySelector('input[name=target]:checked')?.value;
-    const r = await fetch('/api/sync', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({target}) });
-    const d = await r.json();
-    if (d.ok) {
-      appendLog('备份完成: ' + d.backup, 'ok');
-      if (d.from_accounts.length) {
-        for (const a of d.from_accounts) {
-          appendLog('  从 ' + a.uid + '… 过户 ' + a.count + ' 条');
-        }
-      } else {
-        appendLog('  无需过户（当前账号已是全部会话归属）', 'warn');
-      }
-      appendLog('会话过户: ' + d.moved_sessions + ' 条', 'ok');
-      appendLog('自动化过户: ' + d.moved_automations + ' 条', 'ok');
-      appendLog('当前账号现有会话: ' + d.total_now + ' 条', 'ok');
-      appendLog('', '');
-      appendLog('请重启 WorkBuddy 使变更生效', 'warn');
+      appendLog('WorkBuddy 已重启，登录和会话已就绪', 'ok');
     } else {
       appendLog('失败: ' + d.error, 'err');
     }
   } catch (e) {
     appendLog('错误: ' + e.message, 'err');
   } finally {
-    $('syncBtn').disabled = false;
+    switching = false;
     loadStatus();
   }
-};
-
-async function refreshQuota(uid) {
-  const btn = document.querySelector('.refresh-btn[data-uid="'+uid+'"]');
-  if (btn) { btn.disabled = true; btn.textContent = '...'; }
-  appendLog('刷新积分 ' + uid.slice(0,8) + '…');
-  try {
-    const r = await fetch('/api/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({uid}) });
-    const d = await r.json();
-    if (d.ok) {
-      const el = document.getElementById('quota-'+uid);
-      const bar = document.getElementById('bar-'+uid);
-      if (el) el.textContent = d.used + '/' + d.total + ' credits';
-      if (bar) { const fill = bar.querySelector('.quota-fill'); const p = d.total>0?Math.min(100,Math.round(d.used/d.total*100)):0; if(fill) fill.style.width = p+'%'; }
-      appendLog('  实时: ' + d.used + '/' + d.total + ' credits (' + d.packages + '包)', 'ok');
-    } else { appendLog('  刷新失败: ' + d.error, 'err'); }
-  } catch(e) { appendLog('  错误: ' + e.message, 'err'); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = '刷新'; } }
 }
 
 document.addEventListener('click', e => {
   const sw = e.target.closest('.switch-btn');
   if (sw && !sw.disabled) { switchAccount(sw.dataset.uid); return; }
+  const launch = e.target.closest('.launch-btn');
+  if (launch) { launchWorkBuddy(); return; }
   const rf = e.target.closest('.refresh-btn');
-  if (rf && !rf.disabled) refreshQuota(rf.dataset.uid);
+  if (rf && !rf.disabled) { refreshQuota(rf.dataset.uid); return; }
+});
+document.addEventListener('change', e => {
+  const checkbox = e.target.closest('.export-check');
+  if (!checkbox) return;
+  checkbox.checked ? selectedForExport.add(checkbox.dataset.uid) : selectedForExport.delete(checkbox.dataset.uid);
+  updateExportButton();
+});
+document.getElementById('authLinkBtn').addEventListener('click', authorizeAccount);
+document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus);
+document.getElementById('restartScriptBtn').addEventListener('click', restartScript);
+document.getElementById('importFile').addEventListener('change', e => importAccounts(e.target.files[0]));
+document.getElementById('exportBtn').addEventListener('click', exportSelectedAccounts);
+document.getElementById('copyLinkBtn').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('authLink').value); appendLog('授权链接已复制', 'ok'); }
+  catch (e) { $('authLink').select(); appendLog('请手动复制授权链接', 'warn'); }
 });
 loadStatus();
 setInterval(loadStatus, 5000);
@@ -657,16 +1133,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _download_json(self, content, filename):
+        body = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/" or path.startswith("/?"):
             self._html()
         elif path == "/api/status":
-            current = get_current_account()
+            runtime = get_running_account()
+            current = runtime or get_current_account()
             self._json({
                 "current": current,
+                "current_verified": bool(runtime),
+                "workbuddy_running": is_workbuddy_running(),
+                "service": get_service_status(),
                 "accounts": get_all_accounts(),
             })
+        elif path == "/api/export-current":
+            try:
+                filename = f"workbuddy_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                self._download_json(export_current_account_json(), filename)
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
         else:
             self.send_error(404)
 
@@ -711,14 +1206,62 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     uid = json.loads(self.rfile.read(length)).get("uid")
                 except Exception:
                     pass
-            log(f"刷新积分: {uid}")
-            result = refresh_quota(uid) if uid else {"ok": False, "error": "缺少 uid"}
-            self._json(result)
+            if not uid:
+                self._json({"ok": False, "error": "缺少 uid"})
+                return
+            try:
+                self._json(refresh_quota(uid))
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)})
+        elif path == "/api/auth/start":
+            try:
+                self._json({"ok": True, **start_cockpit_authorization()})
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)})
+        elif path == "/api/import":
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= 4 * 1024 * 1024:
+                self._json({"ok": False, "error": "导入文件必须小于 4 MB"}, 400)
+                return
+            try:
+                imported = import_accounts_from_json(self.rfile.read(length).decode("utf-8"))
+                self._json({"ok": True, "accounts": imported})
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
+        elif path == "/api/export":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                uids = json.loads(self.rfile.read(length)).get("uids", []) if length else []
+                filename = f"workbuddy_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                self._download_json(serialize_accounts_for_export(uids, load_accounts()), filename)
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
+        elif path == "/api/launch":
+            self._json({"ok": start_workbuddy(), "running": is_workbuddy_running()})
+        elif path == "/api/restart":
+            self._json({"ok": True, "restarting": True})
+            threading.Timer(0.25, restart_script).start()
+        elif path == "/api/auth/poll":
+            length = int(self.headers.get("Content-Length", 0))
+            login_id = None
+            if length:
+                try:
+                    login_id = json.loads(self.rfile.read(length)).get("login_id")
+                except Exception:
+                    pass
+            try:
+                self._json(poll_cockpit_authorization(login_id or ""))
+            except Exception as error:
+                self._json({"ok": False, "pending": False, "error": str(error)})
         else:
             self.send_error(404)
 
     def log_message(self, *args):
         pass  # 静默 HTTP 访问日志
+
+
+class ReusableHTTPServer(http.server.HTTPServer):
+    allow_reuse_address = True
 
 
 def main():
@@ -727,13 +1270,14 @@ def main():
         i = sys.argv.index("--port")
         port = int(sys.argv[i + 1])
 
-    server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    server = ReusableHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}"
-    log(f"WorkBuddy 会话同步器已启动: {url}")
+    log(f"WorkBuddy 会话港已启动: {url}")
     log("按 Ctrl+C 退出")
 
-    # 延迟打开浏览器
-    threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    # 原生桌面壳托管服务时不额外打开浏览器。
+    if "--no-browser" not in sys.argv:
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
     try:
         server.serve_forever()

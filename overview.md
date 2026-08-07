@@ -29,12 +29,18 @@ SELECT * FROM sessions WHERE user_id = '当前登录账号' AND deleted_at IS NU
 ### 当前账号分布（实测）
 
 ```
-bb7bd6e3-29c2-4f10-8786-5b0de76b485b  →  119 个会话（主账号，当前登录）
+bb7bd6e3-29c2-4f10-8786-5b0de76b485b  →  120 个会话（主账号，当前登录）
 ddf6f125-5d5c-43d7-993b-15466d237b60  →  见于 settings.json claw.users（本地 sessions 表无记录）
 41e15573-247c-469d-9769-525981997f78  →  见于 settings.json claw.users（本地 sessions 表无记录）
 ```
 
 ### 重要发现（影响方案适用性）
+
+WorkBuddy 的真实登录身份由 Electron 主进程认证文件恢复，而不是 renderer 的
+Local Storage 或 Cookies：
+`~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info`。
+切换时必须在 WorkBuddy 退出后原子替换这份完整 `{account, auth, accounts}` 会话，
+重新启动并从运行时 UID 验证成功后，才能执行下面的会话过户；认证文件会先生成备份。
 
 dry-run 实测：本地 `sessions` 表**只有主账号** 119 条记录，另外两个账号在本地 DB 里**零会话**。
 

@@ -52,3 +52,5 @@ assert [row["uid"] for row in exported] == ["one", "two"]
 service = app.get_service_status()
 assert service["pid"] == os.getpid() and service["rss_mb"] >= 0
 assert app.script_restart_argv()[0] == sys.executable
+assert app.workbuddy_launch_command() == ["open", "-a", "WorkBuddy"]
+assert app.workbuddy_launch_command(hidden=True) == ["open", "-gj", "-a", "WorkBuddy"]

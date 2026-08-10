@@ -741,10 +741,14 @@ def quit_workbuddy():
     return kill_all_workbuddy()
 
 
-def start_workbuddy():
+def workbuddy_launch_command(hidden=False):
+    return ["open", *(["-gj"] if hidden else []), "-a", "WorkBuddy"]
+
+
+def start_workbuddy(hidden=False):
     import subprocess as sp
     try:
-        sp.run(["open", "-a", "WorkBuddy"], capture_output=True, timeout=15)
+        sp.run(workbuddy_launch_command(hidden), capture_output=True, timeout=15)
         return True
     except Exception:
         return False
@@ -764,8 +768,8 @@ def do_switch_full(target_uid):
     if not sw.get("ok"):
         start_workbuddy()  # 失败也要恢复 WorkBuddy
         return sw
-    log(f"  [3/6] 启动 WorkBuddy 并校验登录账号...")
-    if not start_workbuddy():
+    log(f"  [3/6] 后台启动 WorkBuddy 并校验登录账号...")
+    if not start_workbuddy(hidden=True):
         return {"ok": False, "error": "无法启动 WorkBuddy，未执行会话同步"}
     actual_uid = wait_for_running_account()
     if actual_uid != target_uid:

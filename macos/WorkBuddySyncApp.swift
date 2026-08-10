@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import WebKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
     private let serviceURL = URL(string: "http://127.0.0.1:7531/")!
     private var serviceProcess: Process?
     private var window: NSWindow!
@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "WorkBuddy 会话港"
         window.contentView = webView
+        webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
         window.contentMinSize = NSSize(width: 360, height: 260)
         window.minSize = NSSize(width: 360, height: 320)
@@ -90,6 +91,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         <h2>WorkBuddy 会话港</h2><p>\(message)</p>
         </body></html>
         """, baseURL: nil)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "确认操作"
+        alert.informativeText = message
+        alert.addButton(withTitle: "继续")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
     }
 }
 

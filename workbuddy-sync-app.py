@@ -6,6 +6,7 @@ WorkBuddy Session Harbor（WorkBuddy 会话港）- 独立带界面应用
   python3 workbuddy-sync-app.py            # 启动并自动打开浏览器
   python3 workbuddy-sync-app.py --port 8000 # 指定端口
   python3 workbuddy-sync-app.py --no-browser # 仅启动服务（桌面壳使用）
+  WB_LAN_ACCESS_TOKEN=随机口令 python3 workbuddy-sync-app.py --lan --port 7532 --no-browser
 
 工作流:
   1. 用 cockpit 切换到目标账号
@@ -23,6 +24,7 @@ import json
 import os
 import shutil
 import sqlite3
+import secrets
 import sys
 import threading
 import time
@@ -46,6 +48,18 @@ COCKPIT_KEY_PATH = os.path.join(COCKPIT_DIR, "secure-account-storage.key")
 COCKPIT_INDEX_PATH = os.path.join(COCKPIT_DIR, "workbuddy_accounts.json")
 WORKBUDDY_API = "https://www.codebuddy.cn"
 PENDING_AUTH = {}
+
+
+def is_request_authorized(headers, expected_token):
+    """局域网桥接只接受配对口令；本机模式保持原有无口令行为。"""
+    if not expected_token:
+        return True
+    provided = headers.get("X-WorkBuddy-Access-Token", "")
+    if not provided:
+        authorization = headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            provided = authorization.removeprefix("Bearer ")
+    return secrets.compare_digest(provided, expected_token)
 
 
 def find_accounts_export():
@@ -1121,6 +1135,17 @@ setInterval(loadStatus, 5000);
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def _authorized(self):
+        return is_request_authorized(self.headers, getattr(self.server, "access_token", None))
+
+    def _require_authorization(self):
+        if self._authorized():
+            return True
+        self.send_response(401)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
     def _json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -1147,6 +1172,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self._require_authorization():
+            return
         path = urlparse(self.path).path
         if path == "/" or path.startswith("/?"):
             self._html()
@@ -1170,6 +1197,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if not self._require_authorization():
+            return
         path = urlparse(self.path).path
         if path == "/api/sync":
             # 读取 body 中的 target（选中的目标账号），没有则用当前登录账号
@@ -1274,8 +1303,15 @@ def main():
         i = sys.argv.index("--port")
         port = int(sys.argv[i + 1])
 
-    server = ReusableHTTPServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{port}"
+    lan_mode = "--lan" in sys.argv
+    access_token = os.environ.get("WB_LAN_ACCESS_TOKEN", "")
+    if lan_mode and not access_token:
+        raise SystemExit("--lan 必须设置 WB_LAN_ACCESS_TOKEN，拒绝在局域网裸露账号数据")
+
+    host = "0.0.0.0" if lan_mode else "127.0.0.1"
+    server = ReusableHTTPServer((host, port), Handler)
+    server.access_token = access_token or None
+    url = f"http://{host}:{port}"
     log(f"WorkBuddy 会话港已启动: {url}")
     log("按 Ctrl+C 退出")
 

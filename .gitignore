@@ -10,6 +10,7 @@ dist/
 build/
 *.zip
 *.dmg
+ios/WorkBuddySessionHarbor/WorkBuddySessionHarbor.xcodeproj/
 .env
 .env.*
 workbuddy_accounts*.json

@@ -54,3 +54,7 @@ assert service["pid"] == os.getpid() and service["rss_mb"] >= 0
 assert app.script_restart_argv()[0] == sys.executable
 assert app.workbuddy_launch_command() == ["open", "-a", "WorkBuddy"]
 assert app.workbuddy_launch_command(hidden=True) == ["open", "-gj", "-a", "WorkBuddy"]
+assert app.is_request_authorized({}, None)
+assert app.is_request_authorized({"X-WorkBuddy-Access-Token": "pair"}, "pair")
+assert app.is_request_authorized({"Authorization": "Bearer pair"}, "pair")
+assert not app.is_request_authorized({"X-WorkBuddy-Access-Token": "wrong"}, "pair")

@@ -949,19 +949,29 @@ HTML_PAGE = """<!DOCTYPE html>
     --radius: 10px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.6; padding: clamp(12px, 3vw, 24px); max-width: 960px; margin: 0 auto; min-width: 0; }
-  .title-row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 4px; }
-  h1 { font-size: 20px; font-weight: 600; }
-  .service-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-  .service-status { color: var(--green); font-size: 11px; white-space: nowrap; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.6; padding: 0; margin: 0; min-width: 0; }
+  .app-shell { display: flex; min-height: 100vh; }
+  .sidebar { width: 196px; flex-shrink: 0; background: #1f1f23; border-right: 1px solid #2c2c31; padding: 16px 10px; display: flex; flex-direction: column; gap: 4px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+  .logo-row { display: flex; align-items: center; gap: 9px; padding: 2px 8px 16px; }
+  .logo-dot { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); flex-shrink: 0; }
+  .logo-text { font-size: 14px; font-weight: 600; }
+  .nav-section { font-size: 11px; color: var(--text3); padding: 10px 8px 4px; letter-spacing: 0.5px; }
+  .sidebar .service-tools { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px; align-items: stretch; }
+  .sidebar .service-status { white-space: normal; }
+  .main { flex: 1; min-width: 0; padding: 22px 26px 40px; overflow-y: auto; }
+  .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  .page-head h1 { font-size: 20px; font-weight: 600; }
+  .page-sub { color: var(--text2); font-size: 12px; margin-top: 3px; }
+  .service-status { color: var(--green); font-size: 11px; }
   .service-btn { background: transparent; border: 1px solid var(--border); color: var(--text2); padding: 3px 7px; border-radius: 5px; font-size: 11px; cursor: pointer; }
   .service-btn:hover { border-color: var(--accent); color: var(--accent); }
   .service-btn.restart:hover { border-color: var(--warn); color: var(--warn); }
   .sub { color: var(--text2); font-size: 13px; margin-bottom: 24px; }
-  .platform-tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
-  .platform-tab { background: var(--surface2); border: 1px solid var(--border); color: var(--text2); padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
-  .platform-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .platform-tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .platform-tabs { display: flex; flex-direction: column; gap: 2px; }
+  .platform-tab { background: transparent; border: none; border-left: 2px solid transparent; color: var(--text2); padding: 8px 10px; border-radius: 7px; font-size: 13px; cursor: pointer; text-align: left; }
+  .platform-tab:hover { background: var(--surface2); color: var(--text); }
+  .platform-tab.active { background: #2b3a4a; border-left-color: var(--accent); color: var(--text); }
+  .platform-tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
   .platform-panel { display: none; }
   .platform-panel.active { display: block; }
   .app-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -1015,8 +1025,9 @@ HTML_PAGE = """<!DOCTYPE html>
   .ok { color: var(--green); } .err { color: #ff5252; } .warn { color: var(--warn); }
   .tip { color: var(--text3); font-size: 12px; margin-top: 20px; line-height: 1.7; }
   .tip b { color: var(--warn); }
-  .acc-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 12px; }
+  .acc-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 0; }
   .acc-card.cur { border-color: var(--green); }
+  .acc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .acc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .export-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .acc-nick { font-size: 16px; font-weight: 600; }
@@ -1041,11 +1052,20 @@ HTML_PAGE = """<!DOCTYPE html>
   .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--text3); border-top-color: var(--accent); border-radius: 50%; animation: sp 0.7s linear infinite; vertical-align: middle; margin-right: 6px; }
   @keyframes sp { to { transform: rotate(360deg); } }
+  @media (max-width: 760px) {
+    .app-shell { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; position: static; border-right: none; border-bottom: 1px solid #2c2c31; flex-direction: row; align-items: center; gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+    .logo-row { padding: 0 4px; }
+    .nav-section { display: none; }
+    .platform-tabs { flex-direction: row; flex-wrap: wrap; }
+    .platform-tab { border-left: none; border: 1px solid var(--border); padding: 5px 12px; font-size: 12px; }
+    .platform-tab.active { border-color: var(--accent); }
+    .sidebar .service-tools { flex-direction: row; align-items: center; }
+    .main { padding: 16px 14px 32px; }
+  }
   @media (max-width: 520px) {
-    .title-row { align-items: flex-start; flex-direction: column; gap: 4px; }
-    .service-tools { justify-content: flex-start; }
-    .sub { margin-bottom: 14px; }
     .card, .acc-card { padding: 14px; }
+    .acc-grid { grid-template-columns: 1fr; }
     .auth-actions { display: grid; grid-template-columns: 1fr; }
     .auth-action { min-width: 0; width: 100%; }
     .auth-link-box { flex-wrap: wrap; }
@@ -1058,17 +1078,26 @@ HTML_PAGE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-  <div class="title-row"><h1>WorkBuddy 会话港</h1><div class="service-tools"><span class="service-status" id="serviceStatus">后台脚本检测中…</span><button class="service-btn" id="refreshStatusBtn">刷新状态</button><button class="service-btn restart" id="restartScriptBtn">重启脚本</button></div></div>
-  <p class="sub">多平台账号与授权管理 · Cockpit 兼容账号库 · 会话同步与切号</p>
-  <div class="platform-tabs" id="platformTabs"></div>
-  <div class="platform-panel active" id="platform-panel-workbuddy">
-  <div class="card auth-card">
-    <div class="label">账号授权</div>
-    <div class="auth-actions">
-      <button class="auth-action" id="addAccountBtn">添加 WorkBuddy 账号</button>
-      <button class="auth-action" id="exportBtn" disabled>导出所选账号 JSON</button>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="logo-row"><span class="logo-dot"></span><span class="logo-text">会话港</span></div>
+    <div class="nav-section">平台</div>
+    <nav class="platform-tabs" id="platformTabs"></nav>
+    <div class="nav-section">服务</div>
+    <div class="service-tools"><span class="service-status" id="serviceStatus">后台脚本检测中…</span><button class="service-btn" id="refreshStatusBtn">刷新状态</button><button class="service-btn restart" id="restartScriptBtn">重启脚本</button></div>
+  </aside>
+  <main class="main">
+    <div class="page-head">
+      <div><h1 id="pageTitle">WorkBuddy</h1><div class="page-sub" id="pageSub">账号与授权管理 · Cockpit 兼容账号库</div></div>
     </div>
-  </div>
+    <div class="platform-panel active" id="platform-panel-workbuddy">
+    <div class="card auth-card">
+      <div class="label">账号授权</div>
+      <div class="auth-actions">
+        <button class="auth-action" id="addAccountBtn">添加 WorkBuddy 账号</button>
+        <button class="auth-action" id="exportBtn" disabled>导出所选账号 JSON</button>
+      </div>
+    </div>
 
   <div class="modal-mask" id="addAccountModal" hidden>
     <div class="modal-box" role="dialog" aria-label="添加 WorkBuddy 账号">
@@ -1120,7 +1149,7 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="label" style="margin-bottom:12px">账号列表 · 每张卡一个主操作</div>
-  <div id="dist"><span class="spin"></span>加载中</div>
+  <div id="dist" class="acc-grid"><span class="spin"></span>加载中</div>
 
   <div class="log" id="log"></div>
 
@@ -1131,6 +1160,8 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
   </div>
   <div class="platform-panel" id="platform-panel-dynamic"><span class="spin"></span>加载平台数据…</div>
+  </main>
+</div>
 
 <script>
 const PLATFORM_COLORS = {workbuddy: 'var(--green)', trae: 'var(--warn)', qwen: '#a88ff2'};
@@ -1153,6 +1184,9 @@ function switchPlatform(id) {
   document.querySelectorAll('.platform-panel').forEach(p => p.classList.remove('active'));
   const panel = $('platform-panel-' + id) || $('platform-panel-dynamic');
   panel.classList.add('active');
+  const info = platformData[id];
+  $('pageTitle').textContent = info ? (info.name || id) : id;
+  $('pageSub').textContent = id === 'workbuddy' ? '账号与授权管理 · Cockpit 兼容账号库' : (info && info.accounts ? `${info.accounts.length} 个账号 · 平台适配器` : '平台适配器');
   renderPlatformTabs();
   if (id !== 'workbuddy') renderDynamicPlatform(id);
 }
@@ -1184,7 +1218,7 @@ function renderDynamicPlatform(id) {
   }
   html += '</div>';
   if ((p.accounts || []).length) {
-    html += `<div class="label" style="margin-bottom:12px">${p.name} · 账号列表</div>`;
+    html += `<div class="label" style="margin-bottom:12px">${p.name} · 账号列表</div><div class="acc-grid">`;
     for (const a of p.accounts) {
       html += `<div class="acc-card"><div class="acc-head"><span class="acc-nick">${a.username || a.user_id}</span>${a.has_token ? '<span class="badge-cur">有 token</span>' : ''}</div>`;
       html += `<div class="acc-foot"><span class="app-state">${a.email || ''}</span><div class="acc-actions">`;
@@ -1192,6 +1226,7 @@ function renderDynamicPlatform(id) {
       if (p.features && p.features.switch) html += `<button class="switch-btn pf-switch" data-platform="${id}" data-id="${a.id}" data-app="${appKey}">切换到该账号</button>`;
       html += '</div></div></div>';
     }
+    html += '</div>';
   } else {
     html += `<div class="card"><div class="label">暂无账号</div><div class="app-state">${(p.features && p.features.note) || '在对应应用登录后，点击下方按钮提取账号。'}</div></div>`;
   }

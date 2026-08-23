@@ -1,8 +1,10 @@
 # WorkBuddy 会话港 · 交接清单
 
-> 编写时间：2026-08-24
+> 编写时间：2026-08-24（最近更新：2026-08-24 06:35，固化稳定版）
 > 关联仓库：`/Users/Zhuanz/Documents/project/workbuddy-session-sync`
 > 当前定位：**多平台可插拔的 AI 办公平台账号管理工具**，模仿 Cockpit 做成模块化，单进程单端口（7531）承载多平台适配器。
+>
+> **本次固化范围**：账号授权、账号切换、账号导入/导出、千问适配器已稳定（测试全绿、已提交推送）。未实现项见第六、七节及专项攻坚文档。
 
 ---
 
@@ -18,9 +20,11 @@
 
 | 平台 | 适配器 | 授权导入 | 切换账号 | 会话同步 | 云端会话 | 额度 | 状态 |
 |------|--------|---------|---------|---------|---------|------|------|
-| **WorkBuddy** | 内置（workbuddy-sync-app.py） | ✅ OAuth state+poll / Token / JSON / 本地导入 / 2FA TOTP | ✅ auth.info 注入切换 | ✅ SQLite user_id 归并 | — | ✅ Cockpit 资源包刷新 | 稳定 |
-| **Trae Work** | platforms/trae.py | ✅ storage.json iCube 提取（双 App） | ✅ 退出→备份→注入→重启→校验 | 🔴 阻塞 | ✅ Cloud-IDE-JWT 双网关 | — | 核心已通，会话同步待破 |
-| **千问办公** | platforms/qwen.py（占位） | 🔴 Phase 2（auth.dat 自定义加密待逆向） | 🔴 Phase 2 | 🔴 Phase 2 | — | — | 调研结论已落档 |
+| **WorkBuddy** | 内置（workbuddy-sync-app.py） | ✅ OAuth state+poll / Token / JSON / 本地导入 / 2FA TOTP | ✅ auth.info 注入切换 | ✅ SQLite user_id 归并 | — | ✅ Cockpit 资源包刷新 | **稳定** |
+| **Trae Work** | platforms/trae.py | ✅ storage.json iCube 提取（双 App） | ✅ 退出→备份→注入→重启→校验 | 🔴 阻塞（SQLCipher 密钥未破） | ✅ Cloud-IDE-JWT 双网关 | — | **账号功能稳定，会话同步待破** |
+| **千问办公** | platforms/qwen.py | ✅ safeStorage 提取（已破解） | ✅ 退出→备份→加密注入→重启→校验 | 🔴 未实现（待研究） | — | — | **账号功能稳定，会话同步未开始** |
+
+> 本次固化的"已跑通"功能 = 上表所有 ✅ 项：**账号授权（导入）与账号切换，三个平台全部可用**。未实现项（两个平台的会话同步）见第六节。
 
 ### 2.1 WorkBuddy（最完整）
 
@@ -35,17 +39,18 @@
 - **双 App**：`solo_cn` = TRAE SOLO CN（工作台），`trae_cn` = Trae CN（IDE）。网关 `trae-api-cn.mchost.guru` / `work.enterprise.trae.cn`，鉴权 `Cloud-IDE-JWT`。
 - **提取**：解密 `~/Library/Application Support/TRAE SOLO CN/User/globalStorage/storage.json` 的 iCube 信封（AES-128-CBC，PREFIX+salt 方案），账号存入 `~/.antigravity_cockpit/trae_work_accounts/`。
 - **切换**：退出 App → 备份 storage.json（保留近 10 份）→ 注入 storage_payload → 重启 → 12s 后校验登录。
-- **🔴 会话同步阻塞**：ai-agent `database.db` 是 SQLCipher 4 加密（PBKDF2-HMAC-SHA512 256000 轮、AES-256-CBC 每页独立 IV）。密钥运行时随机生成并持久化，**SIP + hardened runtime 封死内存扫描/lldb**，Keychain/环境变量/machine_id 派生全排除。
-  - **P0 出路**：逆向 AHA-IPC 协议（unix socket + JSON-RPC）直连 ai-agent 进程取会话，绕过数据库解密。dylib 内有完整 aha-ipc crate 源码路径线索。详见 `trae_sycn/HANDOFF_本地会话同步.md`。
-  - **P0 兜底**：探测云端 API 是否支持查"进行中"会话（当前只返回 status=5 已完成）。
+- **🔴 会话同步阻塞**：ai-agent `database.db` 是 SQLCipher 加密，密钥未找到。已排除多条死路（外部直连 AHA-IPC、frb_api 8717 端口、云端 API code=1001 等）。
+  - **详细结论与下一步路线见专项文档 `HANDOFF_Trae本地会话同步攻坚.md`**（含已确认架构事实、SQLCipher 排查记录、已排除死路、按成本排序的下一步路线）。
+  - **下一步优先**：查渲染进程明文缓存 `state.vscdb`（已发现 `draft:session:<会话ID>:work` key），零风险、最可能直接拿到会话元数据。
 - **本机已有账号**：`~/.antigravity_cockpit/trae_work_accounts/` 3 个真实账号。
 
-### 2.3 千问办公（Phase 2 占位）
+### 2.3 千问办公（账号功能已稳定，会话同步未实现）
 
 - App：`QwenWorkCN.app`（`cn.qwenwork.desktop.mac` v0.1.8）。
-- 登录态：`~/Library/Application Support/QwenWorkCN/auth.dat` + `auth-v2.dat`，v10 信封头（类 Electron safeStorage）。
-- Keychain 有 `QwenWorkCN Safe Storage`（base64 raw 16B 密钥），但**标准 Electron safeStorage 三种派生（PBKDF2 saltysalt/1003、raw 直接做 key、固定 IV 空格）全部解不开** → 自定义加密方案。
-- **破解需反汇编 `app.asar`** 找加密实现。占位模块 `status()` 能探测安装/登录态，`capture()`/`switch()` 守卫抛 Phase 2 错误。
+- **登录态已破解**：`~/Library/Application Support/QwenWorkCN/auth.dat` + `auth-v2.dat`，标准 Electron safeStorage v10 信封。**破解关键**：macOS Chromium 派生是 `PBKDF2-HMAC-SHA1(keychain密码, 'saltysalt', 1003, 16)` → AES-128-CBC，IV=16 空格，v10 头 3 字节（此前误用 SHA256 才失败）。
+- `auth-v2.dat` 明文是 `schemaVersion=2` JSON：`token/refreshToken/user{id,name,email,orgName,planName}/expiresAt`。
+- **已实现**：capture（提取当前登录）/ switch（退出→备份→加密注入→重启→校验）/ import / status 全接口，解密+加密双向，账号库 `qwen_accounts/`（Cockpit 互认）。实测读取当前登录成功。提交 `3f407e3`。
+- **🔴 会话同步未实现**：千问的云端会话 API 尚未研究（`sessions_cloud: false`）。属"后续再搞"项，不在本次固化范围。
 
 ---
 
@@ -60,7 +65,7 @@ workbuddy-session-sync/
 ├── platforms/                   # 可插拔适配器层
 │   ├── __init__.py              # 注册表：get_platform / list_platforms
 │   ├── trae.py                  # Trae 适配器（提取/切换/云端会话/导入）
-│   └── qwen.py                  # 千问 Phase 2 占位（含调研结论）
+│   └── qwen.py                  # 千问适配器（safeStorage 破解，capture/switch/import/status）
 ├── macos/
 │   ├── WorkBuddySyncApp.swift   # WebKit 壳（端口 7531，托管 Python 服务）
 │   ├── Info.plist
@@ -113,36 +118,52 @@ ls "<App>/Contents/Resources/platforms/"
 
 ---
 
-## 六、已完成工作（2026-08-23 时间线）
+## 六、阻塞项与已知问题（未实现清单）
 
-1. **OAuth 授权登录迁移**：会话港加 Cockpit 式"添加 WorkBuddy 账号"弹窗（4 tab + 2FA 工具 + 在浏览器打开 + 倒计时轮询）。`/api/auth/open`、`/api/import/token`、`/api/totp`、`/api/scan-local` 四个新路由。提交 `fc4f3f5`。
-2. **7 个账号导入**：从 `~/Downloads/workbuddy_accounts_2026-08-23.json` 导入 Cockpit 账号库（导入前已备份 `.bak.20260823-231038`）。
-3. **多平台架构**：`platforms/` 适配器层 + Trae 完整移植 + 千问占位。UI 平台 Tab + 动态面板。`build-macos-app.sh` 修打包 platforms。最新提交见 git log。
-4. **桌面 App 精简**：每次重建带时间戳备份，旧版送 `~/.Trash`（可恢复），新版改回干净名 `WorkBuddy 会话港.app`。
+> 本次固化**不包含**以下项，均属"后续再搞"。每项已指明阻塞原因与专项文档。
+
+| 未实现项 | 平台 | 阻塞原因 | 指引文档 |
+|------|------|------|------|
+| 本地会话同步 | Trae Work | ai-agent `database.db` SQLCipher 加密，密钥未找到；已排除外部直连/frb_api/云端等死路 | `HANDOFF_Trae本地会话同步攻坚.md` |
+| 云端会话浏览 | 千问办公 | 千问云端会话 API 尚未研究 | 待立项 |
+| iOS 端授权弹窗 | 全平台 | 手机端 WebView 交互未适配 | 单独开一轮 |
+
+**已解决（本次固化前遗留）**：千问 `auth.dat` 加密已破解（此前列为阻塞），账号功能已并入稳定版。
+
+### 6.1 已排除的死路（别再走）
+1. **外部直连 ai-agent 的 AHA-IPC**——进程内 socketpair，无外部入口。
+2. **`frb_api`/8717 端口**——实锤是用户自己的"分润宝"项目，与 Trae 会话无关，只是借用了 TRAE 的 Python 解释器。
+3. **云端 API `chat_sessions`**——token 有效但服务端 `code=1001` 会话校验拒绝。
+
+详见 `HANDOFF_Trae本地会话同步攻坚.md` 第四节。
 
 ---
 
-## 七、阻塞项与已知问题
-
-| 问题 | 影响 | 出路 |
-|------|------|------|
-| Trae 本地会话同步 | 看不到进行中会话 | 逆向 AHA-IPC 协议（P0），或云端 API status 探测（P0 兜底） |
-| 千问 auth.dat 自定义加密 | 无法提取/切换千问账号 | 反汇编 `app.asar` 找加密实现（Phase 2） |
-| iOS 端授权弹窗 | 手机端交互未适配 | 单独开一轮做 iOS WebView 交互 |
-| 桌面 App 重建带时间戳 | 旧版易堆积 | 习惯：重建后立即删旧留新改干净名（脚本可固化） |
-
----
-
-## 八、下一步优先级
+## 七、下一步优先级（未实现项的攻坚顺序）
 
 | 优先级 | 行动 | 说明 |
 |--------|------|------|
-| 🟥 P0 | Trae AHA-IPC 协议逆向 | 唯一能拿到进行中会话的正路，dylib 有源码路径线索 |
-| 🟥 P0 | Trae 云端 API status 参数探测 | 30 分钟零成本，可能直接拿到进行中会话 |
-| 🟧 P1 | 千问 app.asar 反汇编 | 破 auth.dat 加密后补齐 capture/switch |
+| 🟥 P0 | Trae 渲染缓存 `state.vscdb` 挖掘 | 已发现 `draft:session:<会话ID>:work` key，零风险、最可能直接拿到会话元数据。详见攻坚文档第六节第 1 步 |
+| 🟥 P0 | Trae Keychain 全量扫描 | dylib 有 keyring 字符串，服务名可能不含 "trae"，逐条试做 SQLCipher key |
+| 🟧 P1 | 千问云端会话 API 研究 | 补齐千问 `sessions_cloud` 能力 |
 | 🟧 P1 | iOS 端授权弹窗交互 | 手机端可用 |
-| 🟩 P2 | 把"重建→删旧→改名"固化进 build 脚本 | 避免桌面堆积 |
+| 🟩 P2 | 反汇编 `libai_agent.dylib` 找 SQLCipher key 派生 | 最后手段，项目级工作量 |
 | 🟩 P2 | 适配器能力探测自动渲染 UI | 不同平台按 features 矩阵渲染可用操作 |
+
+> 注：桌面 App 重建"自动删旧留新"已固化进 `build-macos-app.sh`（提交 `e353530`），不再是待办。
+
+---
+
+## 八、已完成工作（2026-08-23 ~ 24 时间线）
+
+1. **OAuth 授权登录迁移**：会话港加 Cockpit 式"添加 WorkBuddy 账号"弹窗（4 tab + 2FA 工具 + 在浏览器打开 + 倒计时轮询）。`/api/auth/open`、`/api/import/token`、`/api/totp`、`/api/scan-local` 四个新路由。提交 `fc4f3f5`。
+2. **7 个账号导入**：从 `~/Downloads/workbuddy_accounts_2026-08-23.json` 导入 Cockpit 账号库（导入前已备份 `.bak.20260823-231038`）。
+3. **多平台架构**：`platforms/` 适配器层 + Trae 完整移植。UI 平台 Tab + 动态面板。`build-macos-app.sh` 修打包 platforms。提交 `aeca1e3`。
+4. **界面侧栏导航布局（方案 A）**：提交 `2dc06a9`。
+5. **build 脚本自动删旧留新**：提交 `e353530`（用户长期要求：重建桌面 App 后桌面只留一个最新版）。
+6. **千问办公适配器全功能**：safeStorage 加密破解 + capture/switch/import/status，实测读取登录成功。提交 `3f407e3`。
+7. **桌面精简**：多次删旧留新，桌面始终只有一个 `WorkBuddy 会话港.app`。
+8. **Trae 本地会话同步攻坚（阶段性结论）**：写 `HANDOFF_Trae本地会话同步攻坚.md`，确认 AHA-IPC 无外部入口、SQLCipher 密钥排查全失败、`frb_api` 实锤无关，明确下一步路线。
 
 ---
 

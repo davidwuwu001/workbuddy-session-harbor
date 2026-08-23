@@ -61,11 +61,20 @@ python3 workbuddy-session-sync.py --watch
 
 写入数据库前请退出 WorkBuddy 并先备份 `~/.workbuddy/workbuddy.db`。同步只处理本地归属，不替代 Cockpit 的账号授权或云端数据同步。
 
+Trae 本地会话可通过官方 `export_past_chat` 能力只读导出，不需要 SQLCipher 密钥。导出前先退出 TRAE SOLO CN；工具用调试管道启动临时实例，完成后自动关闭，不开放调试端口：
+
+```bash
+node trae-local-session-export.js <24位会话ID> /absolute/path/session.md
+```
+
+导出的 Markdown 含完整对话正文，属于敏感数据，请勿提交到 Git。当前工具解决“读取/归档”，尚未写入 Trae 数据库或变更会话账号归属。
+
 ## 开发验证
 
 ```bash
 python3 -m py_compile workbuddy-session-sync.py workbuddy-sync-app.py
 python3 workbuddy-sync-app.test.py
+node trae-local-session-export.test.js
 git diff --check
 ```
 

@@ -1,6 +1,6 @@
 # AI 账号坞 · 交接清单
 
-> 编写时间：2026-08-24（最近更新：2026-08-24 06:35，固化稳定版）
+> 编写时间：2026-08-24（最近更新：2026-08-24，Trae 只读会话导出突破）
 > 关联仓库：`/Users/Zhuanz/Documents/project/workbuddy-session-sync`
 > 当前定位：**多平台可插拔的 AI 办公平台账号管理工具**，模仿 Cockpit 做成模块化，单进程单端口（7531）承载多平台适配器。
 >
@@ -21,7 +21,7 @@ AI 账号坞是一个 macOS 本地工具（Python HTTP 服务 + WebKit 壳），
 | 平台 | 适配器 | 授权导入 | 切换账号 | 会话同步 | 云端会话 | 额度 | 状态 |
 |------|--------|---------|---------|---------|---------|------|------|
 | **WorkBuddy** | 内置（workbuddy-sync-app.py） | ✅ OAuth state+poll / Token / JSON / 本地导入 / 2FA TOTP | ✅ auth.info 注入切换 | ✅ SQLite user_id 归并 | — | ✅ Cockpit 资源包刷新 | **稳定** |
-| **Trae Work** | platforms/trae.py | ✅ storage.json iCube 提取（双 App） | ✅ 退出→备份→注入→重启→校验 | 🔴 阻塞（SQLCipher 密钥未破） | ✅ Cloud-IDE-JWT 双网关 | — | **账号功能稳定，会话同步待破** |
+| **Trae Work** | platforms/trae.py | ✅ storage.json iCube 提取（双 App） | ✅ 退出→备份→注入→重启→校验 | 🟡 正文只读导出已通；账号归并未验证 | ✅ Cloud-IDE-JWT 双网关 | — | **账号功能稳定，只读导出已验证** |
 | **千问办公** | platforms/qwen.py | ✅ safeStorage 提取（已破解） | ✅ 退出→备份→加密注入→重启→校验 | 🔴 未实现（待研究） | — | — | **账号功能稳定，会话同步未开始** |
 
 > 本次固化的"已跑通"功能 = 上表所有 ✅ 项：**账号授权（导入）与账号切换，三个平台全部可用**。未实现项（两个平台的会话同步）见第六节。
@@ -34,14 +34,14 @@ AI 账号坞是一个 macOS 本地工具（Python HTTP 服务 + WebKit 壳），
 - **切换**：原子替换 `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info`，重启 WorkBuddy 校验实际 UID 后再归并会话。
 - **会话同步**：SQLite `sessions`/`automations` 表按 `user_id` 归并到主账号，支持 `--dry-run`/`--merge-once`/`--watch`。
 
-### 2.2 Trae Work（核心已通，会话同步阻塞）
+### 2.2 Trae Work（核心已通，只读会话导出已解决）
 
 - **双 App**：`solo_cn` = TRAE SOLO CN（工作台），`trae_cn` = Trae CN（IDE）。网关 `trae-api-cn.mchost.guru` / `work.enterprise.trae.cn`，鉴权 `Cloud-IDE-JWT`。
 - **提取**：解密 `~/Library/Application Support/TRAE SOLO CN/User/globalStorage/storage.json` 的 iCube 信封（AES-128-CBC，PREFIX+salt 方案），账号存入 `~/.antigravity_cockpit/trae_work_accounts/`。
 - **切换**：退出 App → 备份 storage.json（保留近 10 份）→ 注入 storage_payload → 重启 → 12s 后校验登录。
-- **🔴 会话同步阻塞**：ai-agent `database.db` 是 SQLCipher 加密，密钥未找到。已排除多条死路（外部直连 AHA-IPC、frb_api 8717 端口、云端 API code=1001 等）。
-  - **详细结论与下一步路线见专项文档 `HANDOFF_Trae本地会话同步攻坚.md`**（含已确认架构事实、SQLCipher 排查记录、已排除死路、按成本排序的下一步路线）。
-  - **下一步优先**：查渲染进程明文缓存 `state.vscdb`（已发现 `draft:session:<会话ID>:work` key），零风险、最可能直接拿到会话元数据。
+- **✅ 本地正文只读导出**：已验证官方 `lite/export_past_chat`，无需 SQLCipher 密钥；新增 `trae-local-session-export.js`，通过 `--remote-debugging-pipe` 临时实例导出 Markdown，不开放 TCP 调试端口。
+- **🟡 跨账号归并未完成**：候选 `chat/chat_migrate` 会写数据库且可能产生唯一键冲突，必须在数据库副本上验证后再接入。
+- **详细证据与边界见 `HANDOFF_Trae本地会话同步攻坚.md`**。
 - **本机已有账号**：`~/.antigravity_cockpit/trae_work_accounts/` 3 个真实账号。
 
 ### 2.3 千问办公（账号功能已稳定，会话同步未实现）
@@ -61,6 +61,8 @@ workbuddy-session-sync/
 ├── workbuddy-sync-app.py        # 主应用：HTTP 服务 + Web UI + WorkBuddy 内置逻辑
 │                                #   路由：/api/* + /api/platforms + /api/platform/<id>/<action>
 ├── workbuddy-session-sync.py    # CLI 同步器（--dry-run/--merge-once/--watch）
+├── trae-local-session-export.js # Trae 官方接口只读导出器（remote-debugging-pipe）
+├── trae-local-session-export.test.js
 ├── workbuddy-sync-app.test.py   # 聚焦测试（auth/quota/import/TOTP/平台注册表）
 ├── platforms/                   # 可插拔适配器层
 │   ├── __init__.py              # 注册表：get_platform / list_platforms

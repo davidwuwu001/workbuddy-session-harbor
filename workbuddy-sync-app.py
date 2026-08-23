@@ -35,6 +35,9 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from platforms import get_platform, list_platforms
+
 DB_PATH = os.path.expanduser("~/.workbuddy/workbuddy.db")
 SESSIONS_JSON = os.path.expanduser("~/.workbuddy/app/sessions.json")
 SETTINGS_JSON = os.path.expanduser("~/.workbuddy/settings.json")
@@ -955,6 +958,15 @@ HTML_PAGE = """<!DOCTYPE html>
   .service-btn:hover { border-color: var(--accent); color: var(--accent); }
   .service-btn.restart:hover { border-color: var(--warn); color: var(--warn); }
   .sub { color: var(--text2); font-size: 13px; margin-bottom: 24px; }
+  .platform-tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .platform-tab { background: var(--surface2); border: 1px solid var(--border); color: var(--text2); padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+  .platform-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .platform-tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .platform-panel { display: none; }
+  .platform-panel.active { display: block; }
+  .app-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .app-row:last-child { border-bottom: none; }
+  .app-state { font-size: 12px; color: var(--text3); }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; }
   .label { color: var(--text3); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
   .current-uid { font-family: "SF Mono", Consolas, monospace; font-size: 15px; color: var(--green); word-break: break-all; }
@@ -1047,7 +1059,9 @@ HTML_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <div class="title-row"><h1>WorkBuddy 会话港</h1><div class="service-tools"><span class="service-status" id="serviceStatus">后台脚本检测中…</span><button class="service-btn" id="refreshStatusBtn">刷新状态</button><button class="service-btn restart" id="restartScriptBtn">重启脚本</button></div></div>
-  <p class="sub">Cockpit 授权与额度刷新 · 本工具负责会话同步与切号</p>
+  <p class="sub">多平台账号与授权管理 · Cockpit 兼容账号库 · 会话同步与切号</p>
+  <div class="platform-tabs" id="platformTabs"></div>
+  <div class="platform-panel active" id="platform-panel-workbuddy">
   <div class="card auth-card">
     <div class="label">账号授权</div>
     <div class="auth-actions">
@@ -1115,8 +1129,112 @@ HTML_PAGE = """<!DOCTYPE html>
     点击目标账号的“切换并同步”：工具会切换登录、确认实际账号、归并会话并重启 WorkBuddy。<br>
     当前登录账号可点击“启动 WorkBuddy”。每次会话同步自动备份 workbuddy.db。
   </div>
+  </div>
+  <div class="platform-panel" id="platform-panel-dynamic"><span class="spin"></span>加载平台数据…</div>
 
 <script>
+const PLATFORM_COLORS = {workbuddy: 'var(--green)', trae: 'var(--warn)', qwen: '#a88ff2'};
+const PLATFORM_ORDER = ['workbuddy', 'trae', 'qwen'];
+let platformData = {}, activePlatform = 'workbuddy';
+
+function renderPlatformTabs() {
+  const tabs = PLATFORM_ORDER.map(id => {
+    const info = platformData[id];
+    const label = info ? (info.name || id) : id;
+    const dot = info ? `<span class="dot" style="background:${PLATFORM_COLORS[id] || 'var(--text3)'}"></span>` : '';
+    const cls = 'platform-tab' + (activePlatform === id ? ' active' : '');
+    return `<button class="${cls}" data-platform="${id}">${dot}${label}</button>`;
+  }).join('');
+  $('platformTabs').innerHTML = tabs;
+}
+
+function switchPlatform(id) {
+  activePlatform = id;
+  document.querySelectorAll('.platform-panel').forEach(p => p.classList.remove('active'));
+  const panel = $('platform-panel-' + id) || $('platform-panel-dynamic');
+  panel.classList.add('active');
+  renderPlatformTabs();
+  if (id !== 'workbuddy') renderDynamicPlatform(id);
+}
+
+async function loadPlatforms() {
+  try {
+    const d = await (await fetch('/api/platforms')).json();
+    if (!d.ok) throw new Error(d.error);
+    platformData = {};
+    for (const p of d.platforms) platformData[p.id] = p;
+    platformData.workbuddy = platformData.workbuddy || {id: 'workbuddy', name: 'WorkBuddy'};
+    renderPlatformTabs();
+  } catch (e) { appendLog('平台列表加载失败: ' + e.message, 'err'); }
+}
+
+function featureBadge(f) {
+  if (f === true) return '<span class="ok">✓</span>';
+  if (f === 'planned' || f === 'capture') return '';
+  return f ? '' : '<span class="err">—</span>';
+}
+
+function renderDynamicPlatform(id) {
+  const p = platformData[id];
+  if (!p) return;
+  let html = `<div class="card"><div class="label">${p.name} · 应用状态</div>`;
+  for (const [key, app] of Object.entries(p.apps || {})) {
+    const cur = app.current && app.current.username ? app.current.username : '未登录';
+    html += `<div class="app-row"><div><b>${app.title}</b><div class="app-state">${app.installed ? '已安装' : '未安装'} · ${app.running ? '运行中' : '未运行'} · 当前: ${cur}</div></div></div>`;
+  }
+  html += '</div>';
+  if ((p.accounts || []).length) {
+    html += `<div class="label" style="margin-bottom:12px">${p.name} · 账号列表</div>`;
+    for (const a of p.accounts) {
+      html += `<div class="acc-card"><div class="acc-head"><span class="acc-nick">${a.username || a.user_id}</span>${a.has_token ? '<span class="badge-cur">有 token</span>' : ''}</div>`;
+      html += `<div class="acc-foot"><span class="app-state">${a.email || ''}</span><div class="acc-actions">`;
+      const appKey = Object.keys(p.apps || {})[0] || 'solo_cn';
+      if (p.features && p.features.switch) html += `<button class="switch-btn pf-switch" data-platform="${id}" data-id="${a.id}" data-app="${appKey}">切换到该账号</button>`;
+      html += '</div></div></div>';
+    }
+  } else {
+    html += `<div class="card"><div class="label">暂无账号</div><div class="app-state">${(p.features && p.features.note) || '在对应应用登录后，点击下方按钮提取账号。'}</div></div>`;
+  }
+  html += `<div class="card auth-card"><div class="label">账号操作</div><div class="auth-actions">`;
+  if (p.features && (p.features.auth === 'capture')) {
+    const appKeys = Object.keys(p.apps || {});
+    for (const k of appKeys) html += `<button class="auth-action pf-capture" data-platform="${id}" data-app="${k}">提取 ${(p.apps[k].title || k).split('（')[0]} 当前登录</button>`;
+  }
+  if (p.features && p.features.note) html += `<div class="auth-hint" style="flex-basis:100%">${p.features.note}</div>`;
+  html += '</div></div>';
+  $('platform-panel-dynamic').innerHTML = html;
+}
+
+async function pfCapture(platform, app) {
+  appendLog(`正在提取 ${platform}:${app} 登录账号…`);
+  try {
+    const d = await (await fetch(`/api/platform/${platform}/capture`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({app})})).json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog(`提取成功: ${d.account.username}`, 'ok');
+    loadPlatforms();
+  } catch (e) { appendLog('提取失败: ' + e.message, 'err'); }
+}
+
+async function pfSwitch(platform, id, app) {
+  if (!confirm(`确认切换到该账号？会退出并重启对应应用。`)) return;
+  appendLog('正在切换…（退出→注入→重启→校验，约 15 秒）');
+  try {
+    const d = await (await fetch(`/api/platform/${platform}/switch`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({account_id: id, app})})).json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog(`切换完成: ${d.username}${d.verified ? '（已验证登录）' : '（校验未确认，应用可能仍在启动）'}`, d.verified ? 'ok' : 'warn');
+    loadPlatforms();
+  } catch (e) { appendLog('切换失败: ' + e.message, 'err'); }
+}
+
+document.addEventListener('click', e => {
+  const tab = e.target.closest('.platform-tab');
+  if (tab) { switchPlatform(tab.dataset.platform); return; }
+  const cap = e.target.closest('.pf-capture');
+  if (cap) { pfCapture(cap.dataset.platform, cap.dataset.app); return; }
+  const sw = e.target.closest('.pf-switch');
+  if (sw && !sw.disabled) { pfSwitch(sw.dataset.platform, sw.dataset.id, sw.dataset.app); return; }
+});
+
 const $ = id => document.getElementById(id);
 const selectedForExport = new Set();
 function appendLog(text, cls) {
@@ -1397,6 +1515,7 @@ document.getElementById('totpBtn').addEventListener('click', () => {
 });
 loadStatus();
 setInterval(loadStatus, 5000);
+loadPlatforms();
 </script>
 </body>
 </html>"""
@@ -1472,6 +1591,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 filename = f"workbuddy_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 self._download_json(export_current_account_json(), filename)
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
+        elif path == "/api/platforms":
+            try:
+                self._json({"ok": True, "platforms": list_platforms()})
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 500)
+        elif path.startswith("/api/platform/"):
+            parts = [p for p in path.split("/") if p]
+            if len(parts) < 3:
+                self._json({"ok": False, "error": "路径格式: /api/platform/<id>/<action>"}, 404)
+                return
+            _, _, platform_id, action = parts
+            try:
+                adapter = get_platform(platform_id)
+                if action == "status":
+                    self._json({"ok": True, **adapter.status()})
+                elif action == "sessions":
+                    qs = dict(p.split("=", 1) for p in urlparse(self.path).query.split("&") if "=" in p)
+                    self._json({"ok": True, **adapter.list_sessions(qs.get("account_id", ""))})
+                else:
+                    self._json({"ok": False, "error": f"未知动作: {action}"}, 404)
             except Exception as error:
                 self._json({"ok": False, "error": str(error)}, 400)
         else:
@@ -1592,6 +1733,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(poll_cockpit_authorization(login_id or ""))
             except Exception as error:
                 self._json({"ok": False, "pending": False, "error": str(error)})
+        elif path.startswith("/api/platform/"):
+            parts = [p for p in path.split("/") if p]
+            if len(parts) < 3:
+                self._json({"ok": False, "error": "路径格式: /api/platform/<id>/<action>"}, 404)
+                return
+            _, _, platform_id, action = parts
+            body = self._read_json() or {}
+            try:
+                adapter = get_platform(platform_id)
+                if action == "capture":
+                    self._json({"ok": True, "account": adapter.capture(body.get("app", "solo_cn"))})
+                elif action == "switch":
+                    account_id = body.get("account_id")
+                    if not account_id:
+                        self._json({"ok": False, "error": "缺少 account_id"}, 400)
+                        return
+                    self._json(adapter.switch(account_id, body.get("app", "solo_cn")))
+                elif action == "launch":
+                    adapter.launch(body.get("app", "solo_cn"))
+                    self._json({"ok": True})
+                elif action == "import":
+                    content = body.get("content")
+                    if not content:
+                        self._json({"ok": False, "error": "缺少 content"}, 400)
+                        return
+                    self._json({"ok": True, "imported": adapter.import_accounts(content)})
+                else:
+                    self._json({"ok": False, "error": f"未知动作: {action}"}, 404)
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
         else:
             self.send_error(404)
 

@@ -88,4 +88,28 @@ assert app.open_authorization_url("y")["ok"]
 assert not app.open_authorization_url("missing")["ok"]
 app.PENDING_AUTH = saved
 
+from platforms import trae, qwen
+from platforms import get_platform, list_platforms
+
+assert trae.PLATFORM_ID == "trae" and qwen.PLATFORM_ID == "qwen"
+assert get_platform("trae") is trae
+try:
+    get_platform("nope")
+    raise AssertionError("未知平台应抛错")
+except RuntimeError:
+    pass
+platforms = {p["id"]: p for p in list_platforms()}
+assert set(platforms) >= {"trae", "qwen"}
+assert platforms["qwen"]["features"]["auth"] == "planned"
+assert platforms["trae"]["features"]["switch"] is True
+assert trae.decrypt_storage_value("") is None
+sample = {"id": "trae_work_x", "kind": "trae_work", "user_id": "u1", "username": "T1"}
+imported = trae.import_accounts([sample])
+assert imported[0]["id"] == "trae_work_x"
+try:
+    qwen.capture()
+    raise AssertionError("qwen capture 应抛 Phase 2 错误")
+except RuntimeError as e:
+    assert "Phase 2" in str(e)
+
 print("OK")

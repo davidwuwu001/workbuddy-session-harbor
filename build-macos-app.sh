@@ -26,6 +26,8 @@ for spec in "16x16:16" "16x16@2x:32" "32x32:32" "32x32@2x:64" "128x128:128" "128
 done
 iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
 cp "$ROOT/workbuddy-sync-app.py" "$RESOURCES/workbuddy-sync-app.py"
+cp -R "$ROOT/platforms" "$RESOURCES/platforms"
+find "$RESOURCES/platforms" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 cp "$ROOT/macos/Info.plist" "$CONTENTS/Info.plist"
 codesign --force --deep --sign - "$APP" >/dev/null
 plutil -lint "$CONTENTS/Info.plist" >/dev/null

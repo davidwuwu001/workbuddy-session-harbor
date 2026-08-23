@@ -100,16 +100,13 @@ except RuntimeError:
     pass
 platforms = {p["id"]: p for p in list_platforms()}
 assert set(platforms) >= {"trae", "qwen"}
-assert platforms["qwen"]["features"]["auth"] == "planned"
 assert platforms["trae"]["features"]["switch"] is True
 assert trae.decrypt_storage_value("") is None
 sample = {"id": "trae_work_x", "kind": "trae_work", "user_id": "u1", "username": "T1"}
 imported = trae.import_accounts([sample])
 assert imported[0]["id"] == "trae_work_x"
-try:
-    qwen.capture()
-    raise AssertionError("qwen capture 应抛 Phase 2 错误")
-except RuntimeError as e:
-    assert "Phase 2" in str(e)
+
+assert platforms["qwen"]["features"]["auth"] == "capture"
+assert platforms["qwen"]["features"]["switch"] is True
 
 print("OK")

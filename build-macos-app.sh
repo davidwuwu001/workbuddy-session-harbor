@@ -4,10 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="${1:-$HOME/Desktop/WorkBuddy 会话港.app}"
 
+# 删旧留新：目标已存在时自动移到废纸篓（可恢复），保证桌面只保留最新版。
 if [[ -e "$APP" ]]; then
-  print -u2 "目标已存在：$APP"
-  print -u2 "请先移走旧应用，再重新构建。"
-  exit 1
+  TRASH_NAME="$(basename "$APP" .app)-$(date +%s).app"
+  TRASH_DEST="$HOME/.Trash/$TRASH_NAME"
+  print -u2 "已存在旧版，移到废纸篓：$TRASH_DEST"
+  mv "$APP" "$TRASH_DEST"
 fi
 
 CONTENTS="$APP/Contents"

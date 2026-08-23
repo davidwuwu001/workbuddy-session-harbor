@@ -15,7 +15,7 @@
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>CFBundleDisplayName</key>
-  <string>WorkBuddy 会话港</string>
+  <string>AI 账号坞</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>用于连接这台 Mac 上受保护的 WorkBuddy 会话服务。</string>
   <key>NSAppTransportSecurity</key>

@@ -23,7 +23,7 @@ struct HarborView: View {
             if let url = URL(string: serverURL), !serverURL.contains("$(") {
                 HarborWebView(url: url, accessToken: Keychain.value ?? defaultValue("WBDefaultAccessToken"))
                     .id(reloadID)
-                    .navigationTitle("WorkBuddy 会话港")
+                    .navigationTitle("AI 账号坞")
                     .toolbar {
                         Button("连接设置", systemImage: "gear") { showingSettings = true }
                     }

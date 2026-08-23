@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="${1:-$HOME/Desktop/WorkBuddy 会话港.app}"
+APP="${1:-$HOME/Desktop/AI 账号坞.app}"
 
 # 删旧留新：目标已存在时自动移到废纸篓（可恢复），保证桌面只保留最新版。
 if [[ -e "$APP" ]]; then
@@ -18,7 +18,7 @@ ICONSET="$(mktemp -d)/AppIcon.iconset"
 trap 'rm -rf "${ICONSET:h}"' EXIT
 mkdir -p "$CONTENTS/MacOS" "$RESOURCES" "$ICONSET"
 
-swiftc "$ROOT/macos/WorkBuddySyncApp.swift" -o "$CONTENTS/MacOS/WorkBuddySessionHarbor" -framework AppKit -framework WebKit
+swiftc "$ROOT/macos/WorkBuddySyncApp.swift" -o "$CONTENTS/MacOS/AiAccountDock" -framework AppKit -framework WebKit
 swiftc "$ROOT/macos/MakeIcon.swift" -o "${ICONSET:h}/make-icon" -framework AppKit
 "${ICONSET:h}/make-icon" "${ICONSET:h}/AppIcon.png"
 for spec in "16x16:16" "16x16@2x:32" "32x32:32" "32x32@2x:64" "128x128:128" "128x128@2x:256" "256x256:256" "256x256@2x:512" "512x512:512" "512x512@2x:1024"; do

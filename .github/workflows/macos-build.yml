@@ -22,9 +22,9 @@ jobs:
           git diff --check
       - name: Build app
         run: |
-          zsh build-macos-app.sh "$RUNNER_TEMP/WorkBuddy 会话港.app"
-          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/WorkBuddy 会话港.app" "$RUNNER_TEMP/WorkBuddy 会话港-macos-arm64.zip"
+          zsh build-macos-app.sh "$RUNNER_TEMP/AI 账号坞.app"
+          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/AI 账号坞.app" "$RUNNER_TEMP/AI-Account-Dock-macos-arm64.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: WorkBuddy-Session-Harbor-macos-arm64
-          path: ${{ runner.temp }}/WorkBuddy 会话港-macos-arm64.zip
+          name: AI-Account-Dock-macos-arm64
+          path: ${{ runner.temp }}/AI-Account-Dock-macos-arm64.zip

@@ -1,6 +1,6 @@
-# WorkBuddy 会话港
+# AI 账号坞
 
-WorkBuddy 会话港是一个 macOS 本地工具，用来管理 WorkBuddy/Cockpit 账号、刷新额度，并在账号切换后同步本地会话记录。它通过本机文件和 SQLite 工作，不上传 WorkBuddy 会话内容。
+AI 账号坞（原 WorkBuddy 会话港）是一个 macOS 本地工具，多平台可插拔地管理 WorkBuddy / Trae Work / 千问办公的账号授权与切换，并为 WorkBuddy 提供会话同步与额度刷新。它通过本机文件和 SQLite 工作，不上传会话内容。
 
 ## 功能
 
@@ -47,7 +47,7 @@ python3 workbuddy-sync-app.py --port 7531
 zsh build-macos-app.sh
 ```
 
-应用会生成到 `~/Desktop/WorkBuddy 会话港.app`。脚本会签名并校验 App，但当前版本仍使用本机 Python 运行时；首次使用前必须完成上面的依赖安装。
+应用会生成到 `~/Desktop/AI 账号坞.app`。脚本会签名并校验 App，但当前版本仍使用本机 Python 运行时；首次使用前必须完成上面的依赖安装。
 
 如果页面显示“无法读取 Cockpit 账号库”，通常是 Cockpit 尚未登录、账号库目录不存在，或 `cryptography` 安装到了另一个 Python 解释器。
 

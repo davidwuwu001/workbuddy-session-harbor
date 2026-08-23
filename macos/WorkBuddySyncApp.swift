@@ -16,7 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "WorkBuddy 会话港"
+        window.title = "AI 账号坞"
         window.contentView = webView
         webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
@@ -88,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
     private func showError(_ message: String) {
         webView.loadHTMLString("""
         <html><body style="font-family:-apple-system; background:#1a1a1a; color:#eee; padding:48px">
-        <h2>WorkBuddy 会话港</h2><p>\(message)</p>
+        <h2>AI 账号坞</h2><p>\(message)</p>
         </body></html>
         """, baseURL: nil)
     }

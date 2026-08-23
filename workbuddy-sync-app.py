@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WorkBuddy Session Harbor（WorkBuddy 会话港）- 独立带界面应用
+AI 账号坞（AI Account Dock）- 多平台账号管理独立带界面应用
 
 用法:
   python3 workbuddy-sync-app.py            # 启动并自动打开浏览器
@@ -940,7 +940,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WorkBuddy 会话港</title>
+<title>AI 账号坞</title>
 <style>
   :root {
     --bg: #1a1a1a; --surface: #242424; --surface2: #2e2e2e;
@@ -1080,7 +1080,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <body>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="logo-row"><span class="logo-dot"></span><span class="logo-text">会话港</span></div>
+    <div class="logo-row"><span class="logo-dot"></span><span class="logo-text">AI 账号坞</span></div>
     <div class="nav-section">平台</div>
     <nav class="platform-tabs" id="platformTabs"></nav>
     <div class="nav-section">服务</div>
@@ -1824,7 +1824,7 @@ def main():
     server = ReusableHTTPServer((host, port), Handler)
     server.access_token = access_token or None
     url = f"http://{host}:{port}"
-    log(f"WorkBuddy 会话港已启动: {url}")
+    log(f"AI 账号坞已启动: {url}")
     log("按 Ctrl+C 退出")
 
     # 原生桌面壳托管服务时不额外打开浏览器。

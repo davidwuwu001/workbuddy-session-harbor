@@ -279,7 +279,7 @@ def import_accounts(content):
         if not isinstance(raw, dict) or not raw.get("user_id"):
             raise RuntimeError(f"第 {index} 条账号缺少 user_id")
         if not raw.get("auth_payload") or not raw["auth_payload"].get("token"):
-            raise RuntimeError(f"第 {index} 条账号缺少 auth_payload（需从会话港导出）")
+            raise RuntimeError(f"第 {index} 条账号缺少 auth_payload（需从 AI 账号坞导出）")
         raw = dict(raw)
         raw.setdefault("id", f"qwen_{hashlib.md5(str(raw['user_id']).encode()).hexdigest()}")
         raw.setdefault("kind", "qwen")

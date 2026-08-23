@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
-  <key>CFBundleDisplayName</key><string>WorkBuddy 会话港</string>
-  <key>CFBundleExecutable</key><string>WorkBuddySessionHarbor</string>
+  <key>CFBundleDisplayName</key><string>AI 账号坞</string>
+  <key>CFBundleExecutable</key><string>AiAccountDock</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleIdentifier</key><string>cn.workbuddy.sessionharbor</string>
+  <key>CFBundleIdentifier</key><string>com.zhuanz.ai-account-dock</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>WorkBuddySessionHarbor</string>
+  <key>CFBundleName</key><string>AI 账号坞</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>
   <key>CFBundleVersion</key><string>1</string>

@@ -1,4 +1,4 @@
-# WorkBuddy 会话港 · 交接清单
+# AI 账号坞 · 交接清单
 
 > 编写时间：2026-08-24（最近更新：2026-08-24 06:35，固化稳定版）
 > 关联仓库：`/Users/Zhuanz/Documents/project/workbuddy-session-sync`
@@ -10,9 +10,9 @@
 
 ## 一、总览
 
-会话港是一个 macOS 本地工具（Python HTTP 服务 + WebKit 壳），通过适配器层管理多个 AI 办公平台的账号授权、切换、会话同步。账号库与 Cockpit 完全互认，统一存放在 `~/.antigravity_cockpit/`，共用同一把 `secure-account-storage.key`（AES-256-GCM 信封）。
+AI 账号坞是一个 macOS 本地工具（Python HTTP 服务 + WebKit 壳），通过适配器层管理多个 AI 办公平台的账号授权、切换、会话同步。账号库与 Cockpit 完全互认，统一存放在 `~/.antigravity_cockpit/`，共用同一把 `secure-account-storage.key`（AES-256-GCM 信封）。
 
-桌面 App：`~/Desktop/WorkBuddy 会话港.app`（ad-hoc 签名，每次重建带时间戳备份后改回干净名）。
+桌面 App：`~/Desktop/AI 账号坞.app`（ad-hoc 签名，重建自动删旧留新）。原名"WorkBuddy 会话港"，2026-08-24 更名。
 
 ---
 
@@ -88,7 +88,7 @@ workbuddy-session-sync/
 | `~/.antigravity_cockpit/qwen_accounts/`（预留） | 千问 |
 | `~/.antigravity_cockpit/secure-account-storage.key` | **共用加密密钥** |
 
-全部 AES-256-GCM 信封格式，与 Cockpit Tools 完全互认（Cockpit 导出的 JSON 可直接导入会话港，反之亦然）。
+全部 AES-256-GCM 信封格式，与 Cockpit Tools 完全互认（Cockpit 导出的 JSON 可直接导入 AI 账号坞，反之亦然）。
 
 ---
 
@@ -110,7 +110,7 @@ curl -s http://127.0.0.1:7531/api/platforms | python3 -m json.tool
 /opt/homebrew/bin/python3 workbuddy-session-sync.py --whoami
 
 # 重建桌面 App（带时间戳新路径，不动现有 App）
-zsh build-macos-app.sh "$HOME/Desktop/WorkBuddy 会话港-$(date +%Y年%m月%d日-%H-%M-%S).app"
+zsh build-macos-app.sh   # 默认输出 ~/Desktop/AI 账号坞.app，自动删旧留新
 codesign --verify --deep --strict "<App 路径>"     # 必须通过
 # 验证包内 platforms：
 ls "<App>/Contents/Resources/platforms/"
@@ -162,7 +162,7 @@ ls "<App>/Contents/Resources/platforms/"
 4. **界面侧栏导航布局（方案 A）**：提交 `2dc06a9`。
 5. **build 脚本自动删旧留新**：提交 `e353530`（用户长期要求：重建桌面 App 后桌面只留一个最新版）。
 6. **千问办公适配器全功能**：safeStorage 加密破解 + capture/switch/import/status，实测读取登录成功。提交 `3f407e3`。
-7. **桌面精简**：多次删旧留新，桌面始终只有一个 `WorkBuddy 会话港.app`。
+7. **桌面精简**：多次删旧留新，桌面始终只有一个 `AI 账号坞.app`。
 8. **Trae 本地会话同步攻坚（阶段性结论）**：写 `HANDOFF_Trae本地会话同步攻坚.md`，确认 AHA-IPC 无外部入口、SQLCipher 密钥排查全失败、`frb_api` 实锤无关，明确下一步路线。
 
 ---

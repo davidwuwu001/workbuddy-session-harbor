@@ -58,3 +58,34 @@ assert app.is_request_authorized({}, None)
 assert app.is_request_authorized({"X-WorkBuddy-Access-Token": "pair"}, "pair")
 assert app.is_request_authorized({"Authorization": "Bearer pair"}, "pair")
 assert not app.is_request_authorized({"X-WorkBuddy-Access-Token": "wrong"}, "pair")
+
+rfc_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+assert app.normalize_totp_secret(rfc_secret) == rfc_secret
+assert app.normalize_totp_secret("otpauth://totp/Test?secret=" + rfc_secret + "&issuer=WB") == rfc_secret
+assert app.totp_code(rfc_secret, at=59) == "287082"
+assert app.totp_code(rfc_secret, at=1111111109) == "081804"
+
+try:
+    app.prepare_token_import({})
+    raise AssertionError("空输入应抛错")
+except RuntimeError:
+    pass
+try:
+    app.prepare_token_import({"raw": "baretoken"})
+    raise AssertionError("纯 token 缺 uid 应抛错")
+except RuntimeError:
+    pass
+account, source = app.prepare_token_import({"raw": "tk", "uid": "u1"})
+assert source == "token" and account["uid"] == "u1" and account["access_token"] == "tk"
+account, source = app.prepare_token_import({"raw": '{"uid":"u2","access_token":"tk2","nickname":"N"}'})
+assert source == "json" and account["uid"] == "u2" and account["access_token"] == "tk2" and account["nickname"] == "N"
+
+saved = app.PENDING_AUTH
+app.PENDING_AUTH = {"x": {"state": "s", "url": "http://evil.example/", "expires_at": 9_999_999_999}}
+assert not app.open_authorization_url("x")["ok"]
+app.PENDING_AUTH = {"y": {"state": "s", "url": "https://www.codebuddy.cn/login?state=s", "expires_at": 9_999_999_999}}
+assert app.open_authorization_url("y")["ok"]
+assert not app.open_authorization_url("missing")["ok"]
+app.PENDING_AUTH = saved
+
+print("OK")

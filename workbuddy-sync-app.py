@@ -19,12 +19,14 @@ WorkBuddy Session Harbor（WorkBuddy 会话港）- 独立带界面应用
 import base64
 import glob
 import hashlib
+import hmac
 import http.server
 import json
 import os
 import shutil
 import sqlite3
 import secrets
+import struct
 import sys
 import threading
 import time
@@ -47,6 +49,9 @@ COCKPIT_ACCOUNTS_DIR = os.path.join(COCKPIT_DIR, "workbuddy_accounts")
 COCKPIT_KEY_PATH = os.path.join(COCKPIT_DIR, "secure-account-storage.key")
 COCKPIT_INDEX_PATH = os.path.join(COCKPIT_DIR, "workbuddy_accounts.json")
 WORKBUDDY_API = "https://www.codebuddy.cn"
+AUTH_TTL_SECONDS = 600
+AUTH_POLL_SECONDS = 2
+TOTP_STEP_SECONDS = 30
 PENDING_AUTH = {}
 
 
@@ -367,9 +372,28 @@ def start_cockpit_authorization():
     state = data.get("state")
     if not state:
         raise RuntimeError("授权响应缺少 state")
+    url = data.get("authUrl") or f"{WORKBUDDY_API}/login?state={state}"
     login_id = hashlib.md5(f"{state}:{time.time()}".encode()).hexdigest()
-    PENDING_AUTH[login_id] = {"state": state, "expires_at": time.time() + 600}
-    return {"login_id": login_id, "url": data.get("authUrl") or f"{WORKBUDDY_API}/login?state={state}"}
+    PENDING_AUTH[login_id] = {"state": state, "url": url, "expires_at": time.time() + AUTH_TTL_SECONDS}
+    return {
+        "login_id": login_id,
+        "url": url,
+        "ttl": AUTH_TTL_SECONDS,
+        "poll_interval": AUTH_POLL_SECONDS,
+    }
+
+
+def open_authorization_url(login_id):
+    """用系统默认浏览器打开授权链接；仅允许 CodeBuddy 官方域名。"""
+    pending = PENDING_AUTH.get(login_id or "")
+    if not pending or time.time() > pending["expires_at"]:
+        return {"ok": False, "error": "授权会话不存在或已过期，请重新生成链接"}
+    url = pending.get("url", "")
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != "www.codebuddy.cn":
+        return {"ok": False, "error": "拒绝打开非 CodeBuddy 官方域名的授权链接"}
+    threading.Timer(0.1, lambda: webbrowser.open(url)).start()
+    return {"ok": True, "url": url}
 
 
 def poll_cockpit_authorization(login_id):
@@ -403,6 +427,104 @@ def poll_cockpit_authorization(login_id):
         log(f"新账号已授权，但首次额度刷新失败：{error}")
     PENDING_AUTH.pop(login_id, None)
     return {"ok": True, "pending": False, "uid": uid, "nickname": account["nickname"]}
+
+
+def prepare_token_import(payload):
+    """解析 Token 导入输入：支持整段账号 JSON 或纯 accessToken 文本。"""
+    raw = (payload.get("raw") or "").strip()
+    if not raw:
+        raise RuntimeError("请粘贴 accessToken 或账号 JSON")
+    if raw.startswith("{") or raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"JSON 格式错误：{error.msg}")
+        values = parsed if isinstance(parsed, list) else [parsed]
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise RuntimeError("Token 导入一次只支持一个账号对象；批量请用 JSON 文件导入")
+        merged = {**values[0]}
+        if not merged.get("uid"):
+            merged["uid"] = (payload.get("uid") or "").strip() or None
+        accounts = prepare_import_accounts(merged)
+        return accounts[0], "json"
+    uid = (payload.get("uid") or "").strip()
+    if not uid:
+        raise RuntimeError("纯 token 导入必须同时填写账号 UID（JSON 导入则无需填写）")
+    return {
+        "uid": uid,
+        "nickname": (payload.get("nickname") or "").strip() or uid[:8],
+        "email": (payload.get("email") or "").strip() or uid,
+        "access_token": raw,
+        "refresh_token": (payload.get("refresh_token") or "").strip() or None,
+        "domain": (payload.get("domain") or "").strip() or "www.codebuddy.cn",
+    }, "token"
+
+
+def import_account_from_token(payload):
+    """导入前先用刷新接口校验 token 有效性，避免写入无效账号。"""
+    account, source = prepare_token_import(payload)
+    refreshed = False
+    if account.get("refresh_token"):
+        try:
+            data = api_request(
+                "/v2/plugin/auth/token/refresh",
+                "POST",
+                {},
+                {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {account['access_token']}",
+                    "X-Refresh-Token": account["refresh_token"],
+                    **({"X-Domain": account["domain"]} if account.get("domain") else {}),
+                },
+            )
+            account["access_token"] = data.get("accessToken", data.get("access_token", account["access_token"]))
+            account["refresh_token"] = data.get("refreshToken", data.get("refresh_token", account["refresh_token"]))
+            if data.get("expiresAt") or data.get("expires_at"):
+                account["expires_at"] = data.get("expiresAt", data.get("expires_at"))
+            if data.get("domain"):
+                account["domain"] = data["domain"]
+            refreshed = True
+        except Exception as error:
+            raise RuntimeError(f"token 校验失败（刷新接口拒绝）：{error}")
+    write_cockpit_account(account)
+    return {"ok": True, "uid": account["uid"], "nickname": account["nickname"], "source": source, "refreshed": refreshed}
+
+
+def scan_local_accounts():
+    """重新扫描本机 Cockpit 账号库（本地导入）。"""
+    accounts = read_cockpit_accounts()
+    return {
+        "ok": True,
+        "count": len(accounts),
+        "accounts": [
+            {"uid": uid, "email": acc.get("email", ""), "has_token": bool(acc.get("access_token"))}
+            for uid, acc in sorted(accounts.items())
+        ],
+    }
+
+
+def normalize_totp_secret(secret):
+    """兼容 otpauth:// URI 与裸 Base32 密钥。"""
+    from urllib.parse import parse_qs
+
+    text = (secret or "").strip()
+    if text.lower().startswith("otpauth://"):
+        text = parse_qs(urlparse(text).query).get("secret", [""])[0].strip()
+    text = text.replace(" ", "").upper()
+    if not text:
+        raise RuntimeError("未识别到 2FA 密钥")
+    return text
+
+
+def totp_code(secret, at=None):
+    """RFC 6238 TOTP（SHA1/30s/6 位），仅用标准库实现。"""
+    normalized = normalize_totp_secret(secret)
+    key = base64.b32decode(normalized + "=" * (-len(normalized) % 8), casefold=True)
+    counter = int((at if at is not None else time.time()) // TOTP_STEP_SECONDS)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
 
 
 def log(msg):
@@ -853,6 +975,29 @@ HTML_PAGE = """<!DOCTYPE html>
   .auth-link-box { display: flex; gap: 8px; margin-top: 10px; }
   .auth-link-box input { min-width: 0; flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text2); border-radius: 6px; padding: 7px 9px; font-size: 12px; }
   .auth-hint { color: var(--text3); font-size: 11px; margin-top: 6px; }
+  .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.62); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+  .modal-mask[hidden] { display: none; }
+  .modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 540px; padding: 18px 20px; max-height: 88vh; overflow-y: auto; }
+  .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .modal-title { font-size: 16px; font-weight: 600; }
+  .modal-close { background: transparent; border: none; color: var(--text2); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 8px; border-radius: 6px; }
+  .modal-close:hover { color: var(--text); background: var(--surface2); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; flex-wrap: wrap; }
+  .tab { background: transparent; border: none; color: var(--text2); padding: 8px 12px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .tab-panel .auth-action { width: 100%; }
+  .auth-open-row { margin-top: 8px; }
+  .auth-status { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--text2); }
+  .totp-box { margin-top: 16px; border-top: 1px dashed var(--border); padding-top: 12px; }
+  .totp-head { color: var(--text3); font-size: 12px; margin-bottom: 8px; }
+  .totp-result { display: flex; align-items: baseline; gap: 10px; margin-top: 10px; }
+  .totp-code { font-family: "SF Mono", Consolas, monospace; font-size: 26px; letter-spacing: 4px; color: var(--green); }
+  .totp-count { color: var(--text3); font-size: 12px; }
+  #tab-token textarea { width: 100%; min-height: 90px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 10px; font-size: 12px; font-family: "SF Mono", Consolas, monospace; resize: vertical; }
+  .token-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+  .token-grid input { min-width: 0; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 9px; font-size: 12px; }
   .log { background: var(--surface2); border-radius: var(--radius); padding: 14px 16px; margin-top: 16px; font-family: "SF Mono", Consolas, monospace; font-size: 12px; color: var(--text2); white-space: pre-wrap; min-height: 20px; max-height: 240px; overflow-y: auto; }
   .log:empty::before { content: "等待操作..."; color: var(--text3); }
   .ok { color: var(--green); } .err { color: #ff5252; } .warn { color: var(--warn); }
@@ -906,14 +1051,52 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="card auth-card">
     <div class="label">账号授权</div>
     <div class="auth-actions">
-      <button class="auth-action" id="authLinkBtn">生成授权链接</button>
-      <label class="auth-action" for="importFile">导入 JSON 文件</label>
-      <input id="importFile" type="file" accept="application/json,.json" hidden>
+      <button class="auth-action" id="addAccountBtn">添加 WorkBuddy 账号</button>
       <button class="auth-action" id="exportBtn" disabled>导出所选账号 JSON</button>
     </div>
-    <div id="authLinkBox" hidden>
-      <div class="auth-link-box"><input id="authLink" readonly><button class="auth-action" id="copyLinkBtn">复制</button></div>
-      <div class="auth-hint">复制链接后自行在浏览器完成登录；本页会自动识别授权结果。</div>
+  </div>
+
+  <div class="modal-mask" id="addAccountModal" hidden>
+    <div class="modal-box" role="dialog" aria-label="添加 WorkBuddy 账号">
+      <div class="modal-head"><span class="modal-title">添加 WorkBuddy 账号</span><button class="modal-close" id="closeAccountModal" aria-label="关闭">×</button></div>
+      <div class="tabs">
+        <button class="tab active" data-tab="oauth">OAuth 授权</button>
+        <button class="tab" data-tab="token">Token</button>
+        <button class="tab" data-tab="json">JSON</button>
+        <button class="tab" data-tab="local">本地导入</button>
+      </div>
+      <div class="tab-panel active" id="tab-oauth">
+        <button class="auth-action" id="authLinkBtn">生成授权链接</button>
+        <div id="authLinkBox" hidden>
+          <div class="auth-link-box"><input id="authLink" readonly><button class="auth-action" id="copyLinkBtn">复制</button></div>
+          <div class="auth-open-row"><button class="auth-action" id="openLinkBtn">在浏览器中打开</button></div>
+          <div class="auth-status"><span class="spin"></span><span id="authPollText">等待授权完成…</span></div>
+          <div class="auth-hint" id="authMeta"></div>
+        </div>
+        <div class="totp-box">
+          <div class="totp-head">2FA 验证码工具（本地计算，密钥不上传）</div>
+          <div class="auth-link-box"><input id="totpSecret" placeholder="粘贴 Base32 密钥或 otpauth:// 链接"><button class="auth-action" id="totpBtn">生成</button></div>
+          <div class="totp-result" id="totpResult" hidden><span class="totp-code" id="totpCode"></span><span class="totp-count" id="totpCount"></span></div>
+        </div>
+      </div>
+      <div class="tab-panel" id="tab-token">
+        <textarea id="tokenRaw" placeholder="粘贴 accessToken，或整段账号 JSON"></textarea>
+        <div class="token-grid">
+          <input id="tokenUid" placeholder="账号 UID（纯 token 必填）">
+          <input id="tokenRefresh" placeholder="refresh_token（可选，用于校验）">
+        </div>
+        <button class="auth-action" id="tokenImportBtn">校验并导入</button>
+        <div class="auth-hint">提供 refresh_token 时先经官方刷新接口校验，通过才写入账号库；JSON 粘贴可自动带出 uid。</div>
+      </div>
+      <div class="tab-panel" id="tab-json">
+        <label class="auth-action" for="importFile">选择 Cockpit 账号 JSON 文件</label>
+        <input id="importFile" type="file" accept="application/json,.json" hidden>
+        <div class="auth-hint">支持账号对象、账号数组或 accounts/items 包装格式，可批量导入。</div>
+      </div>
+      <div class="tab-panel" id="tab-local">
+        <button class="auth-action" id="scanLocalBtn">重新扫描本机 Cockpit 账号库</button>
+        <div class="auth-hint" id="scanLocalResult">读取 ~/.antigravity_cockpit/workbuddy_accounts/ 下的加密账号文件。</div>
+      </div>
     </div>
   </div>
 
@@ -1001,26 +1184,45 @@ async function refreshQuota(uid) {
   finally { if (btn) { btn.disabled = false; btn.textContent = '刷新'; } }
 }
 
-let authorizationTimer;
+let authorizationTimer, authCountdownTimer, authDeadline, currentLoginId;
+function stopAuthTimers() {
+  clearInterval(authorizationTimer);
+  clearInterval(authCountdownTimer);
+}
+function openAccountModal() { $('addAccountModal').hidden = false; }
+function closeAccountModal() {
+  $('addAccountModal').hidden = true;
+  stopAuthTimers();
+  clearInterval(totpTimer);
+}
 async function authorizeAccount() {
-  const button = document.getElementById('authLinkBtn');
-  button.disabled = true;
+  const button = $('authLinkBtn');
+  button.disabled = true; button.textContent = '生成中…';
   try {
     const start = await (await fetch('/api/auth/start', {method:'POST'})).json();
     if (!start.ok) throw new Error(start.error);
+    currentLoginId = start.login_id;
     $('authLink').value = start.url;
     $('authLinkBox').hidden = false;
-    appendLog('授权链接已生成，请复制后在浏览器完成登录…');
-    clearInterval(authorizationTimer);
+    $('authMeta').textContent = `授权有效期 ${start.ttl}s · 轮询间隔 ${start.poll_interval}s`;
+    $('authPollText').textContent = '等待授权完成…';
+    appendLog('授权链接已生成，请在浏览器完成登录…');
+    stopAuthTimers();
+    authDeadline = Date.now() + start.ttl * 1000;
+    authCountdownTimer = setInterval(() => {
+      const left = Math.max(0, Math.round((authDeadline - Date.now()) / 1000));
+      $('authPollText').textContent = `等待授权完成…（剩余 ${left}s）`;
+      if (left <= 0) stopAuthTimers();
+    }, 1000);
     authorizationTimer = setInterval(async () => {
       const result = await (await fetch('/api/auth/poll', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({login_id:start.login_id})})).json();
       if (result.pending) return;
-      clearInterval(authorizationTimer);
-      if (!result.ok) appendLog('授权失败: ' + result.error, 'err');
-      else { appendLog('授权成功: ' + result.nickname, 'ok'); loadStatus(); }
-      button.disabled = false;
-    }, 2000);
-  } catch (e) { appendLog('授权启动失败: ' + e.message, 'err'); button.disabled = false; }
+      stopAuthTimers();
+      if (!result.ok) { appendLog('授权失败: ' + result.error, 'err'); $('authPollText').textContent = '授权失败：' + result.error; }
+      else { appendLog('授权成功: ' + result.nickname, 'ok'); closeAccountModal(); loadStatus(); }
+      button.disabled = false; button.textContent = '生成授权链接';
+    }, (start.poll_interval || 2) * 1000);
+  } catch (e) { appendLog('授权启动失败: ' + e.message, 'err'); button.disabled = false; button.textContent = '生成授权链接'; }
 }
 
 async function importAccounts(file) {
@@ -1123,9 +1325,75 @@ document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus
 document.getElementById('restartScriptBtn').addEventListener('click', restartScript);
 document.getElementById('importFile').addEventListener('change', e => importAccounts(e.target.files[0]));
 document.getElementById('exportBtn').addEventListener('click', exportSelectedAccounts);
+document.getElementById('addAccountBtn').addEventListener('click', openAccountModal);
+document.getElementById('closeAccountModal').addEventListener('click', closeAccountModal);
+$('addAccountModal').addEventListener('click', e => { if (e.target === $('addAccountModal')) closeAccountModal(); });
+document.addEventListener('click', e => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab.dataset.tab));
+});
 document.getElementById('copyLinkBtn').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('authLink').value); appendLog('授权链接已复制', 'ok'); }
   catch (e) { $('authLink').select(); appendLog('请手动复制授权链接', 'warn'); }
+});
+document.getElementById('openLinkBtn').addEventListener('click', async () => {
+  try {
+    const d = await (await fetch('/api/auth/open', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({login_id: currentLoginId || ''})})).json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog('已在默认浏览器打开授权页', 'ok');
+  } catch (e) { appendLog('打开浏览器失败: ' + e.message, 'err'); }
+});
+async function importToken() {
+  const btn = $('tokenImportBtn'); btn.disabled = true; btn.textContent = '校验中…';
+  try {
+    const r = await fetch('/api/import/token', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({raw: $('tokenRaw').value, uid: $('tokenUid').value, refresh_token: $('tokenRefresh').value})});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    appendLog('Token 导入成功: ' + d.nickname + (d.refreshed ? '（已通过官方接口校验）' : '（未提供 refresh_token，未校验）'), 'ok');
+    $('tokenRaw').value = ''; $('tokenUid').value = ''; $('tokenRefresh').value = '';
+    closeAccountModal(); loadStatus();
+  } catch (e) { appendLog('Token 导入失败: ' + e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '校验并导入'; }
+}
+document.getElementById('tokenImportBtn').addEventListener('click', importToken);
+async function scanLocal() {
+  const btn = $('scanLocalBtn'); btn.disabled = true; btn.textContent = '扫描中…';
+  try {
+    const d = await (await fetch('/api/scan-local', {method:'POST'})).json();
+    if (!d.ok) throw new Error(d.error);
+    const withToken = d.accounts.filter(a => a.has_token).length;
+    $('scanLocalResult').textContent = d.count ? `已识别 ${d.count} 个本地账号（含 token ${withToken} 个），账号列表将自动刷新` : '本地账号库为空：请先用 Cockpit 登录过至少一个账号';
+    if (d.count) loadStatus();
+    appendLog('本地扫描完成：' + d.count + ' 个账号', 'ok');
+  } catch (e) { $('scanLocalResult').textContent = '扫描失败: ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = '重新扫描本机 Cockpit 账号库'; }
+}
+document.getElementById('scanLocalBtn').addEventListener('click', scanLocal);
+let totpTimer;
+async function refreshTotp(secret) {
+  try {
+    const d = await (await fetch('/api/totp', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({secret})})).json();
+    if (!d.ok) throw new Error(d.error);
+    $('totpResult').hidden = false;
+    $('totpCode').textContent = d.code;
+    $('totpCount').textContent = d.remaining + 's 后刷新';
+  } catch (e) {
+    clearInterval(totpTimer);
+    $('totpResult').hidden = true;
+    appendLog('2FA 验证码生成失败: ' + e.message, 'err');
+  }
+}
+document.getElementById('totpBtn').addEventListener('click', () => {
+  const secret = $('totpSecret').value.trim();
+  if (!secret) return;
+  clearInterval(totpTimer);
+  refreshTotp(secret);
+  totpTimer = setInterval(() => {
+    if ($('addAccountModal').hidden) { clearInterval(totpTimer); return; }
+    refreshTotp(secret);
+  }, 1000);
 });
 loadStatus();
 setInterval(loadStatus, 5000);
@@ -1153,6 +1421,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_json(self, limit=1024 * 1024):
+        """读取请求体 JSON；空体或格式错误返回 None。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        if not 0 < length <= limit:
+            return None
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            return None
 
     def _html(self):
         body = HTML_PAGE.encode("utf-8")
@@ -1251,6 +1532,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True, **start_cockpit_authorization()})
             except Exception as error:
                 self._json({"ok": False, "error": str(error)})
+        elif path == "/api/auth/open":
+            payload = self._read_json()
+            self._json(open_authorization_url((payload or {}).get("login_id", "")))
+        elif path == "/api/import/token":
+            payload = self._read_json()
+            try:
+                self._json(import_account_from_token(payload or {}))
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
+        elif path == "/api/totp":
+            payload = self._read_json()
+            try:
+                now = time.time()
+                self._json({
+                    "ok": True,
+                    "code": totp_code((payload or {}).get("secret", ""), at=now),
+                    "remaining": TOTP_STEP_SECONDS - int(now % TOTP_STEP_SECONDS),
+                })
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
+        elif path == "/api/scan-local":
+            try:
+                self._json(scan_local_accounts())
+            except Exception as error:
+                self._json({"ok": False, "error": str(error)}, 400)
         elif path == "/api/import":
             length = int(self.headers.get("Content-Length", 0))
             if not 0 < length <= 4 * 1024 * 1024:

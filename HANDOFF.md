@@ -38,7 +38,7 @@ AI 账号坞是一个 macOS 本地工具（Python HTTP 服务 + WebKit 壳），
 
 - **双 App**：`solo_cn` = TRAE SOLO CN（工作台），`trae_cn` = Trae CN（IDE）。网关 `trae-api-cn.mchost.guru` / `work.enterprise.trae.cn`，鉴权 `Cloud-IDE-JWT`。
 - **提取**：解密 `~/Library/Application Support/TRAE SOLO CN/User/globalStorage/storage.json` 的 iCube 信封（AES-128-CBC，PREFIX+salt 方案），账号存入 `~/.antigravity_cockpit/trae_work_accounts/`。
-- **切换**：退出 App → 备份 storage.json（保留近 10 份）→ 注入 storage_payload → 重启 → 12s 后校验登录。
+- **切换**：退出 App → 备份 storage.json（保留近 10 份）→ 注入 storage_payload → 重启 → 12s 后校验登录；校验失败返回失败并自动恢复切换前的登录文件。
 - **✅ 本地正文只读导出**：已验证官方 `lite/export_past_chat`，无需 SQLCipher 密钥；新增 `trae-local-session-export.js`，通过 `--remote-debugging-pipe` 临时实例导出 Markdown，不开放 TCP 调试端口。
 - **🟡 跨账号归并未完成**：候选 `chat/chat_migrate` 会写数据库且可能产生唯一键冲突，必须在数据库副本上验证后再接入。
 - **详细证据与边界见 `HANDOFF_Trae本地会话同步攻坚.md`**。

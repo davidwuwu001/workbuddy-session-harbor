@@ -106,6 +106,34 @@ sample = {"id": "trae_work_x", "kind": "trae_work", "user_id": "u1", "username":
 imported = trae.import_accounts([sample])
 assert imported[0]["id"] == "trae_work_x"
 
+# A rejected Trae credential must not be reported as a successful switch or
+# leave the previous local login file replaced.
+switch_functions = {
+    name: getattr(trae, name)
+    for name in ("read_accounts", "read_storage", "write_storage_atomic", "quit_app", "inject", "launch", "get_current_login")
+}
+original_sleep = trae.time.sleep
+switch_events = []
+try:
+    trae.read_accounts = lambda: {"target-account": {"user_id": "target-user"}}
+    trae.read_storage = lambda _app: {"original": "storage"}
+    trae.write_storage_atomic = lambda app, data: switch_events.append(("restore", app, data))
+    trae.quit_app = lambda app: switch_events.append(("quit", app)) or True
+    trae.inject = lambda app, account: "目标账号"
+    trae.launch = lambda app: switch_events.append(("launch", app)) or True
+    trae.get_current_login = lambda app: {"user_id": "wrong-user", "username": "错误账号"}
+    trae.time.sleep = lambda _seconds: None
+    failed_switch = trae.switch("target-account", "solo_cn")
+finally:
+    for name, function in switch_functions.items():
+        setattr(trae, name, function)
+    trae.time.sleep = original_sleep
+
+assert failed_switch["ok"] is False
+assert failed_switch["rolled_back"] is True
+assert ("restore", "solo_cn", {"original": "storage"}) in switch_events
+assert switch_events.count(("launch", "solo_cn")) == 2
+
 assert platforms["qwen"]["features"]["auth"] == "capture"
 assert platforms["qwen"]["features"]["switch"] is True
 

@@ -308,6 +308,27 @@ def launch(app_key):
 
 def switch(account_id, app_key="solo_cn"):
     """完整切换：退出 → 备份+注入 → 重启 → 校验。"""
+    account = read_accounts().get(account_id)
+    if not account:
+        return {"ok": False, "error": f"账号不存在: {account_id}"}
+    target_user_id = str(account.get("user_id") or "")
+    previous_storage = read_storage(app_key)
+
+    def rollback():
+        if not quit_app(app_key):
+            return False
+        try:
+            if previous_storage is None:
+                path = storage_path(app_key)
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                write_storage_atomic(app_key, previous_storage)
+            launch(app_key)
+            return True
+        except Exception:
+            return False
+
     if not quit_app(app_key):
         return {"ok": False, "error": f"{APPS[app_key]['name']} 未能退出，已中止（未做任何修改）"}
     try:
@@ -317,13 +338,18 @@ def switch(account_id, app_key="solo_cn"):
     try:
         launch(app_key)
     except Exception as error:
-        return {"ok": False, "error": f"注入成功但启动失败: {error}（可手动启动）", "username": username}
+        rolled_back = rollback()
+        return {"ok": False, "error": f"目标账号启动失败: {error}", "username": username,
+                "rolled_back": rolled_back}
     time.sleep(12)
     current = get_current_login(app_key)
-    verified = bool(current and current.get("user_id"))
+    verified = bool(current and str(current.get("user_id") or "") == target_user_id)
     if verified:
         log(f"切换完成并已验证: {current['username']}")
-    return {"ok": True, "username": username, "verified": verified, "current": current}
+        return {"ok": True, "username": username, "verified": True, "current": current}
+    rolled_back = rollback()
+    return {"ok": False, "username": username, "verified": False, "current": current,
+            "rolled_back": rolled_back, "error": "目标账号登录校验失败，请重新提取该账号凭证"}
 
 
 def api_request(account, path, params=None):

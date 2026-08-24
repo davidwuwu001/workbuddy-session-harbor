@@ -53,6 +53,7 @@
 - 新增 `trae-local-session-export.js`：仅在 Trae 已退出时启动 `--remote-debugging-pipe` 临时实例，不监听 TCP，导出完成自动关闭。
 - 真实端到端验证：在已登出状态仍成功导出 112,640 字节、2,044 行 Markdown；临时正文已随即删除。
 - 切换失败回滚验证：无效凭证启动后不再误报成功，原 `storage.json` 已恢复；同一会话在切换前后导出均为 112,640 字节且 SHA-256 一致。
+- 账号切换需在成功校验后立即重新提取 `storage.json`：Trae 会轮换 token，不回写会导致下一次注入返回 401。
 
 ---
 

@@ -106,11 +106,11 @@ sample = {"id": "trae_work_x", "kind": "trae_work", "user_id": "u1", "username":
 imported = trae.import_accounts([sample])
 assert imported[0]["id"] == "trae_work_x"
 
-# A rejected Trae credential must not be reported as a successful switch or
-# leave the previous local login file replaced.
+# Trae switches reject a wrong account, restore the prior login, and persist
+# the rotated credential after a verified switch.
 switch_functions = {
     name: getattr(trae, name)
-    for name in ("read_accounts", "read_storage", "write_storage_atomic", "quit_app", "inject", "launch", "get_current_login")
+    for name in ("read_accounts", "read_storage", "write_storage_atomic", "quit_app", "inject", "launch", "get_current_login", "capture")
 }
 original_sleep = trae.time.sleep
 switch_events = []
@@ -122,8 +122,15 @@ try:
     trae.inject = lambda app, account: "目标账号"
     trae.launch = lambda app: switch_events.append(("launch", app)) or True
     trae.get_current_login = lambda app: {"user_id": "wrong-user", "username": "错误账号"}
+    trae.capture = lambda app: switch_events.append(("capture", app))
     trae.time.sleep = lambda _seconds: None
     failed_switch = trae.switch("target-account", "solo_cn")
+    failed_events = list(switch_events)
+
+    switch_events.clear()
+    trae.get_current_login = lambda app: {"user_id": "target-user", "username": "目标账号"}
+    successful_switch = trae.switch("target-account", "solo_cn")
+    successful_events = list(switch_events)
 finally:
     for name, function in switch_functions.items():
         setattr(trae, name, function)
@@ -131,8 +138,10 @@ finally:
 
 assert failed_switch["ok"] is False
 assert failed_switch["rolled_back"] is True
-assert ("restore", "solo_cn", {"original": "storage"}) in switch_events
-assert switch_events.count(("launch", "solo_cn")) == 2
+assert ("restore", "solo_cn", {"original": "storage"}) in failed_events
+assert failed_events.count(("launch", "solo_cn")) == 2
+assert successful_switch["ok"] is True
+assert ("capture", "solo_cn") in successful_events
 
 assert platforms["qwen"]["features"]["auth"] == "capture"
 assert platforms["qwen"]["features"]["switch"] is True

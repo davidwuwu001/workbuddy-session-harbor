@@ -346,7 +346,13 @@ def switch(account_id, app_key="solo_cn"):
     verified = bool(current and str(current.get("user_id") or "") == target_user_id)
     if verified:
         log(f"切换完成并已验证: {current['username']}")
-        return {"ok": True, "username": username, "verified": True, "current": current}
+        try:
+            capture(app_key)
+            return {"ok": True, "username": username, "verified": True, "current": current,
+                    "credential_refreshed": True}
+        except Exception as error:
+            return {"ok": True, "username": username, "verified": True, "current": current,
+                    "credential_refreshed": False, "warning": f"登录已切换，但最新凭证保存失败: {error}"}
     rolled_back = rollback()
     return {"ok": False, "username": username, "verified": False, "current": current,
             "rolled_back": rolled_back, "error": "目标账号登录校验失败，请重新提取该账号凭证"}

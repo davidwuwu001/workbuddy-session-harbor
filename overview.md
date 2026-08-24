@@ -124,3 +124,13 @@ WorkBuddy 的扩展点（Skill / MCP connector）都是给 AI 用的工具层，
 ## 六、交付物
 
 - `workbuddy-session-sync.py` — 可运行脚本，含 `--dry-run` / `--merge-once` / `--watch` 三种模式
+
+---
+
+## 七、Trae Work 的边界（2026-08-24 实机验证）
+
+Trae Work 与 WorkBuddy 不同：本机往返切换两个 `trae_solo_cn` 账号后，各自的任务列表和会话正文都会恢复，说明本地会话原本就按账号保留，无需修改或迁移会话数据库。
+
+账号坞切换 Trae 时优先读取 Cockpit 的 `~/.antigravity_cockpit/trae_accounts/` OAuth 账号库，按 `platformId=trae_solo_cn` 过滤，并将 `trae_auth_raw` 转为 Trae `storage.json` 的 iCube 加密字段。旧的 `trae_work_accounts/` 登录快照只在 OAuth 账号库不可用时回退使用，避免过期快照导致切换后退出登录。
+
+已验证路径：账号 A → 账号 B → 账号 A；两次切换均精确读回目标 `user_id`，账号 A 的原任务列表及正文在返回后保持可读。这里验证的是“每个账号保留自己的本地会话”，不是让同一会话跨账号共享。

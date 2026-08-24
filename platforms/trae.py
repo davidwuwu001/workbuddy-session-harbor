@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 
 COCKPIT_DIR = os.path.expanduser("~/.antigravity_cockpit")
 ACCOUNTS_DIR = os.path.join(COCKPIT_DIR, "trae_work_accounts")
+OAUTH_ACCOUNTS_DIR = os.path.join(COCKPIT_DIR, "trae_accounts")
 KEY_PATH = os.path.join(COCKPIT_DIR, "secure-account-storage.key")
 INDEX_PATH = os.path.join(COCKPIT_DIR, "trae_work_accounts.json")
 
@@ -29,6 +30,7 @@ APPS = {
         "storage": "~/Library/Application Support/TRAE SOLO CN/User/globalStorage/storage.json",
         "process": "TRAE SOLO CN",
         "app_path": "/Applications/TRAE SOLO CN.app",
+        "platform_id": "trae_solo_cn",
     },
     "trae_cn": {
         "name": "Trae CN",
@@ -36,6 +38,7 @@ APPS = {
         "storage": "~/Library/Application Support/Trae CN/User/globalStorage/storage.json",
         "process": "Trae CN",
         "app_path": "/Applications/Trae CN.app",
+        "platform_id": "trae_cn",
     },
 }
 
@@ -108,6 +111,55 @@ def decrypt_storage_value(value):
         return None
 
 
+def encrypt_storage_value(value):
+    plain = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    signed = hashlib.sha512(plain).digest() + plain
+    padding = 16 - len(signed) % 16
+    padded = signed + bytes([padding]) * padding
+    key_material = os.urandom(32)
+    merged = hashlib.sha512(hashlib.sha512(key_material).digest() + SALT_AES).digest()
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    enc = Cipher(algorithms.AES(merged[:16]), modes.CBC(merged[16:32])).encryptor()
+    raw = PREFIX_AES + key_material + enc.update(padded) + enc.finalize()
+    return base64.b64encode(raw).decode()
+
+
+def build_oauth_storage(account, storage):
+    """把 Cockpit OAuth 账号转换成 Trae 实际读取的 storage.json 字段。"""
+    auth = json.loads(json.dumps(account.get("trae_auth_raw") or {}))
+    user_id = str(account.get("user_id") or auth.get("userId") or "")
+    if not user_id or not auth:
+        raise RuntimeError("Cockpit 账号缺少 Trae OAuth 登录数据")
+    auth["userId"] = user_id
+    if account.get("access_token"):
+        auth["token"] = account["access_token"]
+        if "accessToken" in auth:
+            auth["accessToken"] = account["access_token"]
+    if account.get("refresh_token"):
+        auth["refreshToken"] = account["refresh_token"]
+
+    result = json.loads(json.dumps(storage or {}))
+    result[KEY_AUTH] = encrypt_storage_value(auth)
+
+    server = account.get("trae_server_raw")
+    if isinstance(server, dict):
+        keys = ("commercialActivityInfo", "entitlementInfo", "originPayStatusData", "serverTimeInfo")
+        result[KEY_SERVER] = json.dumps(
+            {key: server[key] for key in keys if key in server},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    usertag = account.get("trae_usertag_raw")
+    if isinstance(usertag, str) and usertag:
+        tags = decrypt_storage_value(result.get(KEY_USERTAG)) or {}
+        if not isinstance(tags, dict):
+            tags = {}
+        tags[user_id] = usertag
+        result[KEY_USERTAG] = encrypt_storage_value(tags)
+    return result
+
+
 def cockpit_cipher():
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     key = base64.b64decode(open(KEY_PATH).read().strip())
@@ -116,12 +168,12 @@ def cockpit_cipher():
     return AESGCM(key)
 
 
-def read_accounts():
-    if not os.path.isdir(ACCOUNTS_DIR):
+def read_encrypted_accounts(directory, pattern):
+    if not os.path.isdir(directory):
         return {}
     cipher = cockpit_cipher()
     result = {}
-    for path in glob.glob(os.path.join(ACCOUNTS_DIR, "trae_work_*.json")):
+    for path in glob.glob(os.path.join(directory, pattern)):
         try:
             envelope = json.load(open(path))
             raw = cipher.decrypt(
@@ -130,11 +182,27 @@ def read_accounts():
                 None,
             )
             account = json.loads(raw)
-            if account.get("user_id"):
+            if account.get("user_id") and account.get("id"):
                 result[account["id"]] = account
         except Exception:
             continue
     return result
+
+
+def read_accounts(app_key="solo_cn"):
+    """优先使用 Cockpit 可自动刷新的 OAuth 账号库，旧快照仅作回退。"""
+    platform_id = APPS[app_key]["platform_id"]
+    oauth = {}
+    for account_id, account in read_encrypted_accounts(OAUTH_ACCOUNTS_DIR, "trae_*.json").items():
+        auth = account.get("trae_auth_raw") or {}
+        if auth.get("platformId") != platform_id:
+            continue
+        account = dict(account)
+        account["username"] = account.get("nickname") or account.get("email") or account.get("user_id")
+        account["token"] = account.get("access_token") or auth.get("token") or auth.get("accessToken")
+        account["token_expired_at"] = account.get("expires_at") or auth.get("expiredAt")
+        oauth[account_id] = account
+    return oauth or read_encrypted_accounts(ACCOUNTS_DIR, "trae_work_*.json")
 
 
 def write_account(account):
@@ -246,12 +314,12 @@ def capture(app_key="solo_cn"):
 
 
 def inject(app_key, account_id):
-    accounts = read_accounts()
+    accounts = read_accounts(app_key)
     account = accounts.get(account_id)
     if not account:
         raise RuntimeError(f"账号不存在: {account_id}")
     payload = account.get("storage_payload") or {}
-    if not payload.get(KEY_AUTH):
+    if not account.get("trae_auth_raw") and not payload.get(KEY_AUTH):
         raise RuntimeError("账号缺少登录凭证，请重新提取")
     path = storage_path(app_key)
     if os.path.exists(path):
@@ -263,12 +331,20 @@ def inject(app_key, account_id):
             except Exception:
                 pass
     storage = read_storage(app_key) or {}
-    storage[KEY_AUTH] = payload[KEY_AUTH]
-    for key in (KEY_SERVER, KEY_HOST, KEY_USERTAG):
-        if payload.get(key) is not None:
-            storage[key] = payload[key]
+    if account.get("trae_auth_raw"):
+        expected = APPS[app_key]["platform_id"]
+        actual = account["trae_auth_raw"].get("platformId")
+        if actual != expected:
+            raise RuntimeError(f"账号平台不匹配：需要 {expected}，实际 {actual or '未知'}")
+        storage = build_oauth_storage(account, storage)
+    else:
+        storage[KEY_AUTH] = payload[KEY_AUTH]
+        for key in (KEY_SERVER, KEY_HOST, KEY_USERTAG):
+            if payload.get(key) is not None:
+                storage[key] = payload[key]
     write_storage_atomic(app_key, storage)
-    return account.get("username", "")
+    info = (account.get("trae_auth_raw") or {}).get("account") or {}
+    return account.get("username") or account.get("nickname") or info.get("username") or ""
 
 
 def is_running(app_key):
@@ -308,7 +384,7 @@ def launch(app_key):
 
 def switch(account_id, app_key="solo_cn"):
     """完整切换：退出 → 备份+注入 → 重启 → 校验。"""
-    account = read_accounts().get(account_id)
+    account = read_accounts(app_key).get(account_id)
     if not account:
         return {"ok": False, "error": f"账号不存在: {account_id}"}
     target_user_id = str(account.get("user_id") or "")

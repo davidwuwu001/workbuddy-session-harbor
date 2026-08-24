@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -103,8 +104,15 @@ assert set(platforms) >= {"trae", "qwen"}
 assert platforms["trae"]["features"]["switch"] is True
 assert trae.decrypt_storage_value("") is None
 sample = {"id": "trae_work_x", "kind": "trae_work", "user_id": "u1", "username": "T1"}
-imported = trae.import_accounts([sample])
+original_write_account = trae.write_account
+written_accounts = []
+try:
+    trae.write_account = lambda account: written_accounts.append(account.copy()) or account["id"]
+    imported = trae.import_accounts([sample])
+finally:
+    trae.write_account = original_write_account
 assert imported[0]["id"] == "trae_work_x"
+assert written_accounts == [sample]
 
 # Trae switches reject a wrong account, restore the prior login, and persist
 # the rotated credential after a verified switch.
@@ -115,7 +123,7 @@ switch_functions = {
 original_sleep = trae.time.sleep
 switch_events = []
 try:
-    trae.read_accounts = lambda: {"target-account": {"user_id": "target-user"}}
+    trae.read_accounts = lambda _app="solo_cn": {"target-account": {"user_id": "target-user"}}
     trae.read_storage = lambda _app: {"original": "storage"}
     trae.write_storage_atomic = lambda app, data: switch_events.append(("restore", app, data))
     trae.quit_app = lambda app: switch_events.append(("quit", app)) or True
@@ -143,7 +151,93 @@ assert failed_events.count(("launch", "solo_cn")) == 2
 assert successful_switch["ok"] is True
 assert ("capture", "solo_cn") in successful_events
 
+# Cockpit OAuth accounts must be injectable without an obsolete storage.json
+# snapshot. The generated iCube auth envelope must round-trip exactly.
+oauth_auth = {
+    "userId": "oauth-user",
+    "token": "oauth-token",
+    "refreshToken": "oauth-refresh",
+    "platformId": "trae_solo_cn",
+    "account": {"username": "OAuth 账号"},
+}
+oauth_account = {
+    "id": "trae_oauth",
+    "user_id": "oauth-user",
+    "access_token": "oauth-token",
+    "refresh_token": "oauth-refresh",
+    "trae_auth_raw": oauth_auth,
+    "trae_server_raw": {
+        "commercialActivityInfo": {"activities": []},
+        "entitlementInfo": {"identity": "lite"},
+        "originPayStatusData": {},
+        "serverTimeInfo": {"offset": 0},
+        "host": "must-not-be-written",
+    },
+    "trae_usertag_raw": "sms",
+}
+oauth_storage = trae.build_oauth_storage(oauth_account, {
+    trae.KEY_USERTAG: trae.encrypt_storage_value({"existing-user": "email"}),
+    trae.KEY_HOST: {"apiHost": "existing"},
+})
+assert trae.decrypt_storage_value(oauth_storage[trae.KEY_AUTH]) == oauth_auth
+assert json.loads(oauth_storage[trae.KEY_SERVER]) == {
+    "commercialActivityInfo": {"activities": []},
+    "entitlementInfo": {"identity": "lite"},
+    "originPayStatusData": {},
+    "serverTimeInfo": {"offset": 0},
+}
+assert trae.decrypt_storage_value(oauth_storage[trae.KEY_USERTAG]) == {
+    "existing-user": "email",
+    "oauth-user": "sms",
+}
+assert oauth_storage[trae.KEY_HOST] == {"apiHost": "existing"}
+
+oauth_switch_events = []
+original_oauth_switch = {
+    name: getattr(trae, name)
+    for name in ("read_accounts", "read_storage", "write_storage_atomic")
+}
+try:
+    trae.read_accounts = lambda _app="solo_cn": {"trae_oauth": oauth_account}
+    trae.read_storage = lambda _app: {trae.KEY_HOST: {"apiHost": "existing"}}
+    trae.write_storage_atomic = lambda app, data: oauth_switch_events.append((app, data))
+    assert trae.inject("solo_cn", "trae_oauth") == "OAuth 账号"
+finally:
+    for name, function in original_oauth_switch.items():
+        setattr(trae, name, function)
+assert trae.decrypt_storage_value(oauth_switch_events[0][1][trae.KEY_AUTH]) == oauth_auth
+
+with tempfile.TemporaryDirectory() as oauth_dir:
+    cipher = trae.cockpit_cipher()
+    nonce = os.urandom(12)
+    encrypted = cipher.encrypt(nonce, json.dumps({
+        **oauth_account,
+        "nickname": "OAuth 账号",
+    }, ensure_ascii=False).encode(), None)
+    envelope = {
+        "version": 1,
+        "kind": "trae",
+        "algorithm": "AES-256-GCM",
+        "key_id": "local-secure-account-storage-v1",
+        "nonce": __import__("base64").b64encode(nonce).decode(),
+        "ciphertext": __import__("base64").b64encode(encrypted).decode(),
+        "encrypted_at": 1,
+    }
+    Path(oauth_dir, "trae_oauth.json").write_text(json.dumps(envelope))
+    original_oauth_dir = getattr(trae, "OAUTH_ACCOUNTS_DIR", None)
+    original_accounts_dir = trae.ACCOUNTS_DIR
+    try:
+        trae.OAUTH_ACCOUNTS_DIR = oauth_dir
+        trae.ACCOUNTS_DIR = str(Path(oauth_dir, "legacy-empty"))
+        assert trae.read_accounts()["trae_oauth"]["username"] == "OAuth 账号"
+    finally:
+        trae.OAUTH_ACCOUNTS_DIR = original_oauth_dir
+        trae.ACCOUNTS_DIR = original_accounts_dir
+
 assert platforms["qwen"]["features"]["auth"] == "capture"
 assert platforms["qwen"]["features"]["switch"] is True
+
+swift_shell = Path(__file__).with_name("macos").joinpath("WorkBuddySyncApp.swift").read_text()
+assert 'process.arguments = ["-B", script.path, "--port", "7531", "--no-browser"]' in swift_shell
 
 print("OK")

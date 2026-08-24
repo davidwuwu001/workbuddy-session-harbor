@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = [script.path, "--port", "7531", "--no-browser"]
+        process.arguments = ["-B", script.path, "--port", "7531", "--no-browser"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {

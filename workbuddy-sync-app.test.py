@@ -240,4 +240,9 @@ assert platforms["qwen"]["features"]["switch"] is True
 swift_shell = Path(__file__).with_name("macos").joinpath("WorkBuddySyncApp.swift").read_text()
 assert 'process.arguments = ["-B", script.path, "--port", "7531", "--no-browser"]' in swift_shell
 
+web_source = Path(__file__).with_name("workbuddy-sync-app.py").read_text()
+assert "closest('.switch-btn:not(.pf-switch)')" in web_source
+assert "localStorage.getItem('activePlatform')" in web_source
+assert "localStorage.setItem('activePlatform', id)" in web_source
+
 print("OK")

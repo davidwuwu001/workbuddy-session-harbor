@@ -1166,7 +1166,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <script>
 const PLATFORM_COLORS = {workbuddy: 'var(--green)', trae: 'var(--warn)', qwen: '#a88ff2'};
 const PLATFORM_ORDER = ['workbuddy', 'trae', 'qwen'];
-let platformData = {}, activePlatform = 'workbuddy';
+let platformData = {}, activePlatform = localStorage.getItem('activePlatform') || 'workbuddy';
 
 function renderPlatformTabs() {
   const tabs = PLATFORM_ORDER.map(id => {
@@ -1181,6 +1181,7 @@ function renderPlatformTabs() {
 
 function switchPlatform(id) {
   activePlatform = id;
+  localStorage.setItem('activePlatform', id);
   document.querySelectorAll('.platform-panel').forEach(p => p.classList.remove('active'));
   const panel = $('platform-panel-' + id) || $('platform-panel-dynamic');
   panel.classList.add('active');
@@ -1198,7 +1199,7 @@ async function loadPlatforms() {
     platformData = {};
     for (const p of d.platforms) platformData[p.id] = p;
     platformData.workbuddy = platformData.workbuddy || {id: 'workbuddy', name: 'WorkBuddy'};
-    renderPlatformTabs();
+    switchPlatform(activePlatform);
   } catch (e) { appendLog('平台列表加载失败: ' + e.message, 'err'); }
 }
 
@@ -1460,7 +1461,7 @@ async function switchAccount(uid) {
 }
 
 document.addEventListener('click', e => {
-  const sw = e.target.closest('.switch-btn');
+  const sw = e.target.closest('.switch-btn:not(.pf-switch)');
   if (sw && !sw.disabled) { switchAccount(sw.dataset.uid); return; }
   const launch = e.target.closest('.launch-btn');
   if (launch) { launchWorkBuddy(); return; }
